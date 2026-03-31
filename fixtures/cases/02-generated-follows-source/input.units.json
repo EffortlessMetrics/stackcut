@@ -1,0 +1,26 @@
+[
+  {
+    "id": "path:src/git/parser.rs",
+    "path": "src/git/parser.rs",
+    "status": "modified",
+    "kind": "behavior",
+    "family": "git",
+    "notes": []
+  },
+  {
+    "id": "path:generated/parser.snap",
+    "path": "generated/parser.snap",
+    "status": "modified",
+    "kind": "generated",
+    "family": "git",
+    "notes": []
+  },
+  {
+    "id": "path:tests/parser.rs",
+    "path": "tests/parser.rs",
+    "status": "modified",
+    "kind": "test",
+    "family": "git",
+    "notes": []
+  }
+]

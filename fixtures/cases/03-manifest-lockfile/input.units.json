@@ -1,0 +1,26 @@
+[
+  {
+    "id": "path:Cargo.toml",
+    "path": "Cargo.toml",
+    "status": "modified",
+    "kind": "manifest",
+    "family": "workspace",
+    "notes": []
+  },
+  {
+    "id": "path:Cargo.lock",
+    "path": "Cargo.lock",
+    "status": "modified",
+    "kind": "lockfile",
+    "family": "workspace",
+    "notes": []
+  },
+  {
+    "id": "path:src/cli/main.rs",
+    "path": "src/cli/main.rs",
+    "status": "modified",
+    "kind": "behavior",
+    "family": "cli",
+    "notes": []
+  }
+]

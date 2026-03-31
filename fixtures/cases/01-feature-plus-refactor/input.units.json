@@ -1,0 +1,39 @@
+[
+  {
+    "id": "path:src/core/rename.rs",
+    "path": "src/core/rename.rs",
+    "old_path": "src/core/old_name.rs",
+    "status": "renamed",
+    "kind": "mechanical",
+    "family": "core",
+    "notes": [
+      "rename-only prep change"
+    ]
+  },
+  {
+    "id": "path:src/core/planner.rs",
+    "path": "src/core/planner.rs",
+    "status": "modified",
+    "kind": "behavior",
+    "family": "core",
+    "notes": [
+      "planner behavior changed"
+    ]
+  },
+  {
+    "id": "path:tests/planner_scenarios.rs",
+    "path": "tests/planner_scenarios.rs",
+    "status": "modified",
+    "kind": "test",
+    "family": "core",
+    "notes": []
+  },
+  {
+    "id": "path:docs/planner.md",
+    "path": "docs/planner.md",
+    "status": "modified",
+    "kind": "documentation",
+    "family": "core",
+    "notes": []
+  }
+]

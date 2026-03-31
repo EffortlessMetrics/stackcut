@@ -1,0 +1,227 @@
+[
+  {
+    "path": ".github/workflows/ci.yml",
+    "sha256": "f5bb3089898d5c21428f4c04bd1cc2c8920a508ed0262fa3de1d592ecaaa83be",
+    "bytes": 454
+  },
+  {
+    "path": ".gitignore",
+    "sha256": "c69c8d041d08cece6d5ba7b39cf3a0b7da0073f81509368c59e8cd418383cffe",
+    "bytes": 35
+  },
+  {
+    "path": "AGENTS.md",
+    "sha256": "c911ac736791d33a0fa48b89c08335f09645e5b8efb622242f75024976b5dae6",
+    "bytes": 1759
+  },
+  {
+    "path": "BUILD_NOTES.md",
+    "sha256": "3895ff41d4dbb4bcfd81e3d50068024315d3456ee9820ee6272e4cae5a5da6cd",
+    "bytes": 510
+  },
+  {
+    "path": "Cargo.toml",
+    "sha256": "cf913a4d1dc3ebfff9475dd1bae9445d14d88be76b7f6cb7ad311c7979b4aa70",
+    "bytes": 487
+  },
+  {
+    "path": "LICENSE.txt",
+    "sha256": "31e742bd400d701667887202bc655ac63485ac87cf0c587ba2b81f29ac67ac7b",
+    "bytes": 146
+  },
+  {
+    "path": "MAINTAINERS.md",
+    "sha256": "5f6654998a336de30acc8f5227924da41f708dd8e16ba6ba28404191af1a744c",
+    "bytes": 921
+  },
+  {
+    "path": "README.md",
+    "sha256": "e59dd9a05c6fdadef7f27ca16549e5722f11f54f31f5c5339d3a2408486ca8d5",
+    "bytes": 4827
+  },
+  {
+    "path": "RELEASE.md",
+    "sha256": "86bfc48c617596e235df169d791ade80e20815dfb659e8c94f0e4d330ea690c3",
+    "bytes": 780
+  },
+  {
+    "path": "TESTING.md",
+    "sha256": "75cb0595d017f74a6970c67622a16f5751d7a3c4a52989547da94f8eb252c96f",
+    "bytes": 1375
+  },
+  {
+    "path": "crates/stackcut-artifact/Cargo.toml",
+    "sha256": "ecae32cf4c526f7fbb8d14cc2c0035b17e9628de13115e45d81164ce5149ed76",
+    "bytes": 231
+  },
+  {
+    "path": "crates/stackcut-artifact/src/lib.rs",
+    "sha256": "269ec644027cc8608e99242b7373a3054e00f1ae0be52f4bc0809af56b0611d0",
+    "bytes": 5999
+  },
+  {
+    "path": "crates/stackcut-cli/Cargo.toml",
+    "sha256": "39b23cf304a033249ace730d0ee9481b466c4af2b19fd3e7306e0e87e7cc2d14",
+    "bytes": 363
+  },
+  {
+    "path": "crates/stackcut-cli/src/main.rs",
+    "sha256": "e6902a51d29e5545106534196bd86436cfa61e59a260886adcafd38a40fe1915",
+    "bytes": 5385
+  },
+  {
+    "path": "crates/stackcut-core/Cargo.toml",
+    "sha256": "2c8f9b8faa03bf870583ccc17ee91f011936254f151b5a9632c7132e5235642b",
+    "bytes": 228
+  },
+  {
+    "path": "crates/stackcut-core/src/lib.rs",
+    "sha256": "a8571271d27f58a8fa7a418bd7a4439624c87551f8af5230260a5f0253939166",
+    "bytes": 32472
+  },
+  {
+    "path": "crates/stackcut-git/Cargo.toml",
+    "sha256": "dab2afbda70e42cdb2a248f1dc381a9ccfefcb0e06d95c37afe5a8a059855f94",
+    "bytes": 224
+  },
+  {
+    "path": "crates/stackcut-git/src/lib.rs",
+    "sha256": "00a907fdea53ff3d1d47d40c1fc404215c6552d50acbdce551e6dbc082586191",
+    "bytes": 7347
+  },
+  {
+    "path": "docs/ARCHITECTURE.md",
+    "sha256": "2a3e19d80b49a053eadd8788d720c4ac910f6377b9f278a5c46382f11a9b7f3b",
+    "bytes": 3443
+  },
+  {
+    "path": "docs/ROADMAP.md",
+    "sha256": "c610d87a4109f526d03c4517f20beb0f2128474492f91449370334e1acbaeb4c",
+    "bytes": 795
+  },
+  {
+    "path": "docs/SCENARIO_ATLAS.md",
+    "sha256": "2841ba88616140b920a00f0055b31e09875c67bd420458565559a18d221ac1c4",
+    "bytes": 1322
+  },
+  {
+    "path": "docs/adr/0001-diff-to-stack-compiler.md",
+    "sha256": "64f415743ea18fb8288a544d9df1efe317ddda1d4feff001dc8b87fa3b226a30",
+    "bytes": 1190
+  },
+  {
+    "path": "examples/override.toml",
+    "sha256": "45b08b8b6b89a574fcdcb0277f207288ce29e09b297bd1cfd69fa8a736c7dbf9",
+    "bytes": 508
+  },
+  {
+    "path": "fixtures/cases/01-feature-plus-refactor/README.md",
+    "sha256": "7193cc6c31a5021b183d07b69abd3b4e640ca9344d3759746e632d0b1d113920",
+    "bytes": 287
+  },
+  {
+    "path": "fixtures/cases/01-feature-plus-refactor/expected.plan.json",
+    "sha256": "74089a12caaad1650e932c68c47426b1c636c3c918afc910b714f534a77d54c3",
+    "bytes": 2322
+  },
+  {
+    "path": "fixtures/cases/01-feature-plus-refactor/input.units.json",
+    "sha256": "e2171e6cd738a305525f79ab822bc8ed50e67179d3f87bda14ffaa0813fc82b9",
+    "bytes": 804
+  },
+  {
+    "path": "fixtures/cases/02-generated-follows-source/README.md",
+    "sha256": "273d5735c0d3a62d7c9e00c6cde52441c4343bd954c2c7f859e2d6ee6d503b99",
+    "bytes": 161
+  },
+  {
+    "path": "fixtures/cases/02-generated-follows-source/expected.plan.json",
+    "sha256": "e693023758069b264acba527d1796380cae7c492c35c708bf3386909318fc308",
+    "bytes": 1380
+  },
+  {
+    "path": "fixtures/cases/02-generated-follows-source/input.units.json",
+    "sha256": "2a582506e5a424c4961e710cb6dc43f4253e36a577f6e3451e3f9e473ab4605c",
+    "bytes": 499
+  },
+  {
+    "path": "fixtures/cases/03-manifest-lockfile/README.md",
+    "sha256": "a8953d3a7c2663e719a2e73bfb50062aed2975f94e4c0fba460e2fdd16582dbe",
+    "bytes": 112
+  },
+  {
+    "path": "fixtures/cases/03-manifest-lockfile/expected.plan.json",
+    "sha256": "7fcfc57fc3369e2d82594b1cdbbea5ca1d5ce3bd80fd153bb5d45940b1a2f708",
+    "bytes": 1916
+  },
+  {
+    "path": "fixtures/cases/03-manifest-lockfile/input.units.json",
+    "sha256": "b2d5a8f14746de0540f5c6f9ae9a0960d1e6e181eeb9fc4b18ac37a1146ac638",
+    "bytes": 478
+  },
+  {
+    "path": "fixtures/cases/04-docs-and-tests-attach/README.md",
+    "sha256": "7aaed5a407ceaa203326801231536ab1c46aea297d01d143e1e9fbdae409f4d6",
+    "bytes": 115
+  },
+  {
+    "path": "fixtures/cases/04-docs-and-tests-attach/expected.plan.json",
+    "sha256": "56aa4a1afa21dcbd7b0163881aba06263d730ab6b81ede2dfd5b4733319ba023",
+    "bytes": 1369
+  },
+  {
+    "path": "fixtures/cases/04-docs-and-tests-attach/input.units.json",
+    "sha256": "a4862ac37b1958731665022487732de299dc72d045193b59c095260996eab3fc",
+    "bytes": 494
+  },
+  {
+    "path": "fixtures/cases/05-ambiguous-root-doc/README.md",
+    "sha256": "29f871b29717b6a43fc92168ebc464954c125e6a1cc7d4ed08f6f22c88de90a3",
+    "bytes": 139
+  },
+  {
+    "path": "fixtures/cases/05-ambiguous-root-doc/expected.plan.json",
+    "sha256": "a3295d6f5c09aae661a27ff8cedb68e6e5b23375ca639da7cd72a1695df1d245",
+    "bytes": 2789
+  },
+  {
+    "path": "fixtures/cases/05-ambiguous-root-doc/input.units.json",
+    "sha256": "5ae583bb9a5b58ddb48583bde31a5e9fb1a3c162b4d054cdf60a22455f655ea9",
+    "bytes": 491
+  },
+  {
+    "path": "justfile",
+    "sha256": "848b89dca9ebaa8a86abbf3b7f4b5c5b0b2d2212540388293e6137457465e43e",
+    "bytes": 346
+  },
+  {
+    "path": "rust-toolchain.toml",
+    "sha256": "0c9b811689c2817b6404b2858b3e8f7aebf513af379da94774521025b7008863",
+    "bytes": 86
+  },
+  {
+    "path": "schema/stackcut.override.schema.json",
+    "sha256": "5df127af0342225ad065028c8260655b23b0b7d8e3db17c74a3bb122b106e319",
+    "bytes": 2231
+  },
+  {
+    "path": "schema/stackcut.plan.schema.json",
+    "sha256": "5555409f30e4c21b0931722aadbcd914dedffe02eb447ac18d8f43fd95faaabc",
+    "bytes": 5786
+  },
+  {
+    "path": "stackcut.toml",
+    "sha256": "9935864a17a7b900673f0759c30bba4eae3937bf78181ef4278ab0fd17e8915e",
+    "bytes": 552
+  },
+  {
+    "path": "xtask/Cargo.toml",
+    "sha256": "4bda115969f4a747cb362cfcc66c4eada2ebf140eccd68d49fb1e6b23f2c3ae0",
+    "bytes": 145
+  },
+  {
+    "path": "xtask/src/main.rs",
+    "sha256": "631edb2d907cd8728737eee4c270c2ed803492452f2afc279e121cbf3e01a021",
+    "bytes": 2325
+  }
+]

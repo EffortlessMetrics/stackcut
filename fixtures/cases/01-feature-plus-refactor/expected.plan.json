@@ -1,0 +1,108 @@
+{
+  "version": "0.1.0",
+  "source": {
+    "base": "fixture-base",
+    "head": "fixture-head",
+    "repo_root": null,
+    "head_tree": null
+  },
+  "units": [
+    {
+      "id": "path:src/core/rename.rs",
+      "path": "src/core/rename.rs",
+      "old_path": "src/core/old_name.rs",
+      "status": "renamed",
+      "kind": "mechanical",
+      "family": "core",
+      "notes": [
+        "rename-only prep change"
+      ]
+    },
+    {
+      "id": "path:src/core/planner.rs",
+      "path": "src/core/planner.rs",
+      "status": "modified",
+      "kind": "behavior",
+      "family": "core",
+      "notes": [
+        "planner behavior changed"
+      ]
+    },
+    {
+      "id": "path:tests/planner_scenarios.rs",
+      "path": "tests/planner_scenarios.rs",
+      "status": "modified",
+      "kind": "test",
+      "family": "core",
+      "notes": []
+    },
+    {
+      "id": "path:docs/planner.md",
+      "path": "docs/planner.md",
+      "status": "modified",
+      "kind": "documentation",
+      "family": "core",
+      "notes": []
+    }
+  ],
+  "slices": [
+    {
+      "id": "mechanical-renames",
+      "title": "Mechanical rename-only changes",
+      "kind": "mechanical",
+      "families": [
+        "core"
+      ],
+      "members": [
+        "path:src/core/rename.rs"
+      ],
+      "depends_on": [],
+      "reasons": [
+        {
+          "code": "fixture",
+          "message": "Pinned by fixture expectation."
+        }
+      ],
+      "proof_surface": {
+        "scenario_ids": [
+          "01-feature-plus-refactor"
+        ],
+        "expected_commands": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "id": "behavior-core",
+      "title": "Behavior: core",
+      "kind": "behavior",
+      "families": [
+        "core"
+      ],
+      "members": [
+        "path:src/core/planner.rs",
+        "path:tests/planner_scenarios.rs",
+        "path:docs/planner.md"
+      ],
+      "depends_on": [
+        "mechanical-renames"
+      ],
+      "reasons": [
+        {
+          "code": "fixture",
+          "message": "Pinned by fixture expectation."
+        }
+      ],
+      "proof_surface": {
+        "scenario_ids": [
+          "01-feature-plus-refactor"
+        ],
+        "expected_commands": [
+          "cargo test --workspace"
+        ]
+      }
+    }
+  ],
+  "ambiguities": [],
+  "diagnostics": []
+}

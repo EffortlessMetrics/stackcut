@@ -1,0 +1,67 @@
+{
+  "version": "0.1.0",
+  "source": {
+    "base": "fixture-base",
+    "head": "fixture-head",
+    "repo_root": null,
+    "head_tree": null
+  },
+  "units": [
+    {
+      "id": "path:src/git/parser.rs",
+      "path": "src/git/parser.rs",
+      "status": "modified",
+      "kind": "behavior",
+      "family": "git",
+      "notes": []
+    },
+    {
+      "id": "path:generated/parser.snap",
+      "path": "generated/parser.snap",
+      "status": "modified",
+      "kind": "generated",
+      "family": "git",
+      "notes": []
+    },
+    {
+      "id": "path:tests/parser.rs",
+      "path": "tests/parser.rs",
+      "status": "modified",
+      "kind": "test",
+      "family": "git",
+      "notes": []
+    }
+  ],
+  "slices": [
+    {
+      "id": "behavior-git",
+      "title": "Behavior: git",
+      "kind": "behavior",
+      "families": [
+        "git"
+      ],
+      "members": [
+        "path:src/git/parser.rs",
+        "path:generated/parser.snap",
+        "path:tests/parser.rs"
+      ],
+      "depends_on": [],
+      "reasons": [
+        {
+          "code": "fixture",
+          "message": "Pinned by fixture expectation."
+        }
+      ],
+      "proof_surface": {
+        "scenario_ids": [
+          "02-generated-follows-source"
+        ],
+        "expected_commands": [
+          "cargo test --workspace"
+        ]
+      }
+    }
+  ],
+  "ambiguities": [],
+  "diagnostics": []
+}

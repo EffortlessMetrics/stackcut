@@ -1,0 +1,22 @@
+version = 1
+
+[[must_link]]
+members = [
+  "path:src/core/planner.rs",
+  "path:tests/planner_scenarios.rs",
+]
+reason = "Keep planner changes with their validating tests."
+
+[[force_members]]
+member = "path:docs/planner.md"
+slice = "behavior-core"
+reason = "Planner docs land with the planner behavior slice."
+
+[[rename_slices]]
+id = "behavior-core"
+title = "Core planner behavior"
+
+[[must_order]]
+before = "mechanical-renames"
+after = "behavior-core"
+reason = "Prep rename should land before behavioral edits."

@@ -1,0 +1,67 @@
+{
+  "version": "0.1.0",
+  "source": {
+    "base": "fixture-base",
+    "head": "fixture-head",
+    "repo_root": null,
+    "head_tree": null
+  },
+  "units": [
+    {
+      "id": "path:src/core/solver.rs",
+      "path": "src/core/solver.rs",
+      "status": "modified",
+      "kind": "behavior",
+      "family": "core",
+      "notes": []
+    },
+    {
+      "id": "path:tests/solver.rs",
+      "path": "tests/solver.rs",
+      "status": "modified",
+      "kind": "test",
+      "family": "core",
+      "notes": []
+    },
+    {
+      "id": "path:docs/solver.md",
+      "path": "docs/solver.md",
+      "status": "modified",
+      "kind": "documentation",
+      "family": "core",
+      "notes": []
+    }
+  ],
+  "slices": [
+    {
+      "id": "behavior-core",
+      "title": "Behavior: core",
+      "kind": "behavior",
+      "families": [
+        "core"
+      ],
+      "members": [
+        "path:src/core/solver.rs",
+        "path:tests/solver.rs",
+        "path:docs/solver.md"
+      ],
+      "depends_on": [],
+      "reasons": [
+        {
+          "code": "fixture",
+          "message": "Pinned by fixture expectation."
+        }
+      ],
+      "proof_surface": {
+        "scenario_ids": [
+          "04-docs-and-tests-attach"
+        ],
+        "expected_commands": [
+          "cargo test --workspace"
+        ]
+      }
+    }
+  ],
+  "ambiguities": [],
+  "diagnostics": []
+}

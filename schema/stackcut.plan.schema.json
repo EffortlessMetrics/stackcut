@@ -1,0 +1,302 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stackcut.dev/schema/stackcut.plan.schema.json",
+  "title": "stackcut plan",
+  "type": "object",
+  "required": [
+    "version",
+    "source",
+    "units",
+    "slices"
+  ],
+  "properties": {
+    "version": {
+      "type": "string"
+    },
+    "source": {
+      "type": "object",
+      "required": [
+        "base",
+        "head"
+      ],
+      "properties": {
+        "repo_root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base": {
+          "type": "string"
+        },
+        "head": {
+          "type": "string"
+        },
+        "head_tree": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "units": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/editUnit"
+      }
+    },
+    "slices": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/slice"
+      }
+    },
+    "ambiguities": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ambiguity"
+      },
+      "default": []
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/diagnostic"
+      },
+      "default": []
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "changeStatus": {
+      "type": "string",
+      "enum": [
+        "added",
+        "modified",
+        "deleted",
+        "renamed",
+        "copied",
+        "unknown"
+      ]
+    },
+    "unitKind": {
+      "type": "string",
+      "enum": [
+        "manifest",
+        "lockfile",
+        "generated",
+        "test",
+        "documentation",
+        "ops-config",
+        "mechanical",
+        "behavior"
+      ]
+    },
+    "sliceKind": {
+      "type": "string",
+      "enum": [
+        "prep-refactor",
+        "behavior",
+        "tests-docs",
+        "generated",
+        "mechanical",
+        "ops-config",
+        "api-schema",
+        "misc"
+      ]
+    },
+    "diagnosticLevel": {
+      "type": "string",
+      "enum": [
+        "error",
+        "warning",
+        "note"
+      ]
+    },
+    "editUnit": {
+      "type": "object",
+      "required": [
+        "id",
+        "path",
+        "status",
+        "kind",
+        "family"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "old_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/changeStatus"
+        },
+        "kind": {
+          "$ref": "#/$defs/unitKind"
+        },
+        "family": {
+          "type": "string"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false
+    },
+    "inclusionReason": {
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "proofSurface": {
+      "type": "object",
+      "properties": {
+        "scenario_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "expected_commands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false,
+      "default": {}
+    },
+    "slice": {
+      "type": "object",
+      "required": [
+        "id",
+        "title",
+        "kind",
+        "members"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/sliceKind"
+        },
+        "families": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/inclusionReason"
+          },
+          "default": []
+        },
+        "proof_surface": {
+          "$ref": "#/$defs/proofSurface"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ambiguity": {
+      "type": "object",
+      "required": [
+        "id",
+        "message",
+        "resolution"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "affected_units": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "candidate_slices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "resolution": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "diagnostic": {
+      "type": "object",
+      "required": [
+        "level",
+        "code",
+        "message"
+      ],
+      "properties": {
+        "level": {
+          "$ref": "#/$defs/diagnosticLevel"
+        },
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

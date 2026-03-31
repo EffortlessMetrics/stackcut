@@ -1,0 +1,26 @@
+[
+  {
+    "id": "path:src/core/solver.rs",
+    "path": "src/core/solver.rs",
+    "status": "modified",
+    "kind": "behavior",
+    "family": "core",
+    "notes": []
+  },
+  {
+    "id": "path:src/git/ingest.rs",
+    "path": "src/git/ingest.rs",
+    "status": "modified",
+    "kind": "behavior",
+    "family": "git",
+    "notes": []
+  },
+  {
+    "id": "path:README.md",
+    "path": "README.md",
+    "status": "modified",
+    "kind": "documentation",
+    "family": "root",
+    "notes": []
+  }
+]

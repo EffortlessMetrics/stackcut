@@ -1,0 +1,23 @@
+version = 1
+generated_prefixes = ["dist/", "generated/", "fixtures/generated/"]
+manifest_files = ["Cargo.toml", "package.json", "pyproject.toml"]
+lock_files = ["Cargo.lock", "package-lock.json", "pnpm-lock.yaml"]
+test_prefixes = ["tests/", "specs/"]
+doc_prefixes = ["docs/", "adr/"]
+ops_prefixes = [".github/", "ci/", ".circleci/"]
+
+[[path_families]]
+prefix = "src/core/"
+family = "core"
+
+[[path_families]]
+prefix = "src/git/"
+family = "git"
+
+[[path_families]]
+prefix = "src/cli/"
+family = "cli"
+
+[[path_families]]
+prefix = "schema/"
+family = "schema"

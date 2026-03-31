@@ -1,0 +1,26 @@
+[
+  {
+    "id": "path:src/core/solver.rs",
+    "path": "src/core/solver.rs",
+    "status": "modified",
+    "kind": "behavior",
+    "family": "core",
+    "notes": []
+  },
+  {
+    "id": "path:tests/solver.rs",
+    "path": "tests/solver.rs",
+    "status": "modified",
+    "kind": "test",
+    "family": "core",
+    "notes": []
+  },
+  {
+    "id": "path:docs/solver.md",
+    "path": "docs/solver.md",
+    "status": "modified",
+    "kind": "documentation",
+    "family": "core",
+    "notes": []
+  }
+]
