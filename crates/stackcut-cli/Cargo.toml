@@ -12,3 +12,8 @@ toml.workspace = true
 stackcut-artifact = { path = "../stackcut-artifact" }
 stackcut-core = { path = "../stackcut-core" }
 stackcut-git = { path = "../stackcut-git" }
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+serde_json.workspace = true

@@ -49,7 +49,7 @@
     {
       "id": "mechanical-renames",
       "title": "Mechanical rename-only changes",
-      "kind": "mechanical",
+      "kind": "prep-refactor",
       "families": [
         "core"
       ],

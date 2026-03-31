@@ -114,7 +114,7 @@
   ],
   "ambiguities": [
     {
-      "id": "ambiguity-root-readme",
+      "id": "ambiguity-readme-md",
       "message": "README.md changed with multiple behavior families and cannot be attached confidently in v0.1.",
       "affected_units": [
         "path:README.md"

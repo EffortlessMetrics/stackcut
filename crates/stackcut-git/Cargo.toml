@@ -8,3 +8,8 @@ rust-version.workspace = true
 anyhow.workspace = true
 tempfile.workspace = true
 stackcut-core = { path = "../stackcut-core" }
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+stackcut-core = { path = "../stackcut-core" }

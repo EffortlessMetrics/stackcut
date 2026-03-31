@@ -66,6 +66,13 @@
         "$ref": "#/$defs/diagnostic"
       },
       "default": []
+    },
+    "fingerprint": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "SHA-256 hash of plan content excluding this field"
     }
   },
   "additionalProperties": false,
