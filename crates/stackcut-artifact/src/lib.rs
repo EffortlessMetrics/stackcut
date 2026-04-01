@@ -37,9 +37,12 @@ pub fn write_receipt(path: &Path, receipt: &RecompositionReceipt) -> Result<()> 
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let json = serde_json::to_string_pretty(receipt).context("failed to serialize receipt")?;
-    fs::write(path, format!("{json}\n"))
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    let file =
+        fs::File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+    let mut writer = std::io::BufWriter::new(file);
+    serde_json::to_writer_pretty(&mut writer, receipt).context("failed to serialize receipt")?;
+    std::io::Write::write_all(&mut writer, b"\n")
+        .with_context(|| format!("failed to write trailing newline to {}", path.display()))?;
     Ok(())
 }
 

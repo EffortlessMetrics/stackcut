@@ -235,7 +235,26 @@ fn cmd_validate(plan_path: &Path, exact: bool, receipt_path: Option<&Path>) -> R
 
         if let Some(rpath) = receipt_path {
             let result =
-                stackcut_git::validate_exact_recomposition_with_receipt(&repo_root, &plan)?;
+                match stackcut_git::validate_exact_recomposition_with_receipt(&repo_root, &plan) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let receipt = RecompositionReceipt {
+                            version: plan.version.clone(),
+                            base: plan.source.base.clone(),
+                            head: plan.source.head.clone(),
+                            head_tree: plan.source.head_tree.clone().unwrap_or_default(),
+                            plan_fingerprint: compute_fingerprint(&plan),
+                            slice_hashes: Vec::new(),
+                            recomposed_tree: String::new(),
+                            verdict: RecompositionVerdict::Fail,
+                            generated_at: chrono::Utc::now().to_rfc3339(),
+                        };
+                        write_receipt(rpath, &receipt)?;
+                        eprintln!("exact recomposition error: {e:#}");
+                        println!("receipt written to {}", rpath.display());
+                        return Ok(ExitCode::RecompositionFailure as i32);
+                    }
+                };
 
             let expected_tree = plan.source.head_tree.clone().unwrap_or_default();
 

@@ -282,30 +282,16 @@ pub fn validate_exact_recomposition_with_receipt(
             .unwrap_or_else(|| format!("unknown-{}", i));
 
         let patch_value = patch.display().to_string();
-        let check_result = run_git_capture(Some(&clone_repo), &["apply", "--check", &patch_value]);
+        let apply_result = run_git_capture(Some(&clone_repo), &["apply", "--index", &patch_value]);
 
-        match check_result {
+        match apply_result {
             Ok(_) => {
-                let apply_result =
-                    run_git_capture(Some(&clone_repo), &["apply", "--index", &patch_value]);
-                match apply_result {
-                    Ok(_) => {
-                        slice_results.push(SliceApplyResult {
-                            slice_id,
-                            patch_sha256,
-                            apply_ok: true,
-                            error: None,
-                        });
-                    }
-                    Err(e) => {
-                        slice_results.push(SliceApplyResult {
-                            slice_id,
-                            patch_sha256,
-                            apply_ok: false,
-                            error: Some(format!("{e}")),
-                        });
-                    }
-                }
+                slice_results.push(SliceApplyResult {
+                    slice_id,
+                    patch_sha256,
+                    apply_ok: true,
+                    error: None,
+                });
             }
             Err(e) => {
                 slice_results.push(SliceApplyResult {
