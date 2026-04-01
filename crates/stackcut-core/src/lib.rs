@@ -134,6 +134,8 @@ pub struct Plan {
     pub diagnostics: Vec<Diagnostic>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub override_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -710,6 +712,7 @@ pub fn plan(
         ambiguities: ambiguities.clone(),
         diagnostics: Vec::new(),
         fingerprint: None,
+        override_fingerprint: None,
     });
 
     if !ambiguities.is_empty() {
@@ -752,6 +755,20 @@ pub fn plan(
         }
     }
 
+    let override_fingerprint = {
+        let has_overrides = !overrides.must_link.is_empty()
+            || !overrides.force_members.is_empty()
+            || !overrides.rename_slices.is_empty()
+            || !overrides.must_order.is_empty();
+        if has_overrides {
+            use sha2::{Digest, Sha256};
+            let json = serde_json::to_string(overrides).unwrap_or_default();
+            Some(format!("{:x}", Sha256::digest(json.as_bytes())))
+        } else {
+            None
+        }
+    };
+
     Plan {
         version: PLAN_VERSION.to_string(),
         source,
@@ -760,6 +777,7 @@ pub fn plan(
         ambiguities,
         diagnostics,
         fingerprint: None,
+        override_fingerprint,
     }
 }
 
@@ -1363,6 +1381,7 @@ mod tests {
             ambiguities: Vec::new(),
             diagnostics: Vec::new(),
             fingerprint: None,
+            override_fingerprint: None,
         };
 
         let diagnostics = structural_validate(&plan);
@@ -3881,6 +3900,159 @@ another_bad_key = 42
                 failures.join("\n\n")
             );
         }
+    }
+
+    #[test]
+    fn empty_overrides_produce_no_override_fingerprint() {
+        let source = PlanSource {
+            repo_root: None,
+            base: "aaa".to_string(),
+            head: "bbb".to_string(),
+            head_tree: None,
+        };
+        let units = vec![unit(
+            "path:src/main.rs",
+            "src/main.rs",
+            UnitKind::Behavior,
+            "app",
+        )];
+        let config = StackcutConfig::default();
+        let overrides = Overrides::default();
+
+        let result = plan(source, units, &config, &overrides);
+        assert_eq!(result.override_fingerprint, None);
+    }
+
+    #[test]
+    fn non_empty_overrides_produce_some_override_fingerprint() {
+        let source = PlanSource {
+            repo_root: None,
+            base: "aaa".to_string(),
+            head: "bbb".to_string(),
+            head_tree: None,
+        };
+        let units = vec![unit(
+            "path:src/main.rs",
+            "src/main.rs",
+            UnitKind::Behavior,
+            "app",
+        )];
+        let config = StackcutConfig::default();
+        let overrides = Overrides {
+            must_link: vec![MustLinkOverride {
+                members: vec!["path:a".to_string(), "path:b".to_string()],
+                reason: None,
+            }],
+            ..Overrides::default()
+        };
+
+        let result = plan(source, units, &config, &overrides);
+        assert!(result.override_fingerprint.is_some());
+        assert!(!result.override_fingerprint.as_ref().unwrap().is_empty());
+    }
+
+    #[test]
+    fn override_fingerprint_is_deterministic() {
+        let make_plan = || {
+            let source = PlanSource {
+                repo_root: None,
+                base: "aaa".to_string(),
+                head: "bbb".to_string(),
+                head_tree: None,
+            };
+            let units = vec![unit(
+                "path:src/main.rs",
+                "src/main.rs",
+                UnitKind::Behavior,
+                "app",
+            )];
+            let config = StackcutConfig::default();
+            let overrides = Overrides {
+                force_members: vec![ForceMemberOverride {
+                    member: "path:src/main.rs".to_string(),
+                    slice: "behavior-app".to_string(),
+                    reason: Some("test".to_string()),
+                }],
+                ..Overrides::default()
+            };
+            plan(source, units, &config, &overrides)
+        };
+
+        let fp1 = make_plan().override_fingerprint;
+        let fp2 = make_plan().override_fingerprint;
+        assert_eq!(fp1, fp2);
+    }
+
+    #[test]
+    fn different_overrides_produce_different_fingerprints() {
+        let source = || PlanSource {
+            repo_root: None,
+            base: "aaa".to_string(),
+            head: "bbb".to_string(),
+            head_tree: None,
+        };
+        let units = || {
+            vec![unit(
+                "path:src/main.rs",
+                "src/main.rs",
+                UnitKind::Behavior,
+                "app",
+            )]
+        };
+        let config = StackcutConfig::default();
+
+        let overrides_a = Overrides {
+            must_link: vec![MustLinkOverride {
+                members: vec!["path:a".to_string(), "path:b".to_string()],
+                reason: None,
+            }],
+            ..Overrides::default()
+        };
+        let overrides_b = Overrides {
+            must_link: vec![MustLinkOverride {
+                members: vec!["path:c".to_string(), "path:d".to_string()],
+                reason: None,
+            }],
+            ..Overrides::default()
+        };
+
+        let plan_a = plan(source(), units(), &config, &overrides_a);
+        let plan_b = plan(source(), units(), &config, &overrides_b);
+        assert_ne!(plan_a.override_fingerprint, plan_b.override_fingerprint);
+    }
+
+    #[test]
+    fn override_fingerprint_roundtrips_through_json() {
+        let source = PlanSource {
+            repo_root: None,
+            base: "aaa".to_string(),
+            head: "bbb".to_string(),
+            head_tree: None,
+        };
+        let units = vec![unit(
+            "path:src/main.rs",
+            "src/main.rs",
+            UnitKind::Behavior,
+            "app",
+        )];
+        let config = StackcutConfig::default();
+        let overrides = Overrides {
+            rename_slices: vec![RenameSliceOverride {
+                id: "behavior-app".to_string(),
+                title: "App logic".to_string(),
+            }],
+            ..Overrides::default()
+        };
+
+        let original = plan(source, units, &config, &overrides);
+        assert!(original.override_fingerprint.is_some());
+
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: Plan = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            original.override_fingerprint,
+            deserialized.override_fingerprint
+        );
     }
 
     /// Returns sorted list of fixture case directories under fixtures/cases/.

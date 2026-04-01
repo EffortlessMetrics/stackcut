@@ -1014,6 +1014,7 @@ mod tests {
             ambiguities: Vec::new(),
             diagnostics: Vec::new(),
             fingerprint: None,
+            override_fingerprint: None,
         }
     }
 
