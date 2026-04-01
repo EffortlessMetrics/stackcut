@@ -203,6 +203,7 @@ pub struct SliceDiff {
     pub title_changed: bool,
     pub old_title: Option<String>,
     pub new_title: Option<String>,
+    pub depends_on_changed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,11 +227,30 @@ pub fn compare_plans(old: &Plan, new: &Plan) -> PlanComparison {
     let old_fp = Some(compute_fingerprint(old));
     let new_fp = Some(compute_fingerprint(new));
 
-    // Index slices by ID for both plans.
-    let old_slices: BTreeMap<&str, &stackcut_core::Slice> =
-        old.slices.iter().map(|s| (s.id.as_str(), s)).collect();
-    let new_slices: BTreeMap<&str, &stackcut_core::Slice> =
-        new.slices.iter().map(|s| (s.id.as_str(), s)).collect();
+    // Index slices by ID for both plans, keeping the first occurrence when
+    // duplicates exist (malformed plans). Warn on stderr about any duplicates.
+    let mut old_slices: BTreeMap<&str, &stackcut_core::Slice> = BTreeMap::new();
+    for s in &old.slices {
+        if old_slices.contains_key(s.id.as_str()) {
+            eprintln!(
+                "warning: duplicate slice ID '{}' in old plan; using first occurrence",
+                s.id
+            );
+        } else {
+            old_slices.insert(s.id.as_str(), s);
+        }
+    }
+    let mut new_slices: BTreeMap<&str, &stackcut_core::Slice> = BTreeMap::new();
+    for s in &new.slices {
+        if new_slices.contains_key(s.id.as_str()) {
+            eprintln!(
+                "warning: duplicate slice ID '{}' in new plan; using first occurrence",
+                s.id
+            );
+        } else {
+            new_slices.insert(s.id.as_str(), s);
+        }
+    }
 
     let old_ids: BTreeSet<&str> = old_slices.keys().copied().collect();
     let new_ids: BTreeSet<&str> = new_slices.keys().copied().collect();
@@ -258,8 +278,9 @@ pub fn compare_plans(old: &Plan, new: &Plan) -> PlanComparison {
 
         let title_changed = old_slice.title != new_slice.title;
         let members_same = old_members == new_members;
+        let depends_on_changed = old_slice.depends_on != new_slice.depends_on;
 
-        if members_same && !title_changed {
+        if members_same && !title_changed && !depends_on_changed {
             slices_unchanged.push(id.to_string());
         } else {
             let members_added: Vec<String> = new_members
@@ -285,6 +306,7 @@ pub fn compare_plans(old: &Plan, new: &Plan) -> PlanComparison {
                 } else {
                     None
                 },
+                depends_on_changed,
             });
         }
     }
@@ -323,7 +345,7 @@ pub fn compare_plans(old: &Plan, new: &Plan) -> PlanComparison {
         Equivalence::UnitsDiffer
     };
 
-    let source_changed = old.source.base != new.source.base || old.source.head != new.source.head;
+    let source_changed = old.source != new.source;
 
     PlanComparison {
         old_fingerprint: old_fp,
@@ -384,6 +406,9 @@ pub fn render_comparison(comparison: &PlanComparison) -> String {
             let old_t = diff.old_title.as_deref().unwrap_or("(none)");
             let new_t = diff.new_title.as_deref().unwrap_or("(none)");
             out.push_str(&format!("  - title: `{old_t}` → `{new_t}`\n"));
+        }
+        if diff.depends_on_changed {
+            out.push_str("  - depends_on: changed\n");
         }
         for m in &diff.members_added {
             out.push_str(&format!("  - added: `{m}`\n"));
@@ -1170,6 +1195,76 @@ mod tests {
         assert!(diff.title_changed);
         assert_eq!(diff.old_title.as_deref(), Some("Old Title"));
         assert_eq!(diff.new_title.as_deref(), Some("New Title"));
+    }
+
+    fn make_slice_with_deps(id: &str, title: &str, members: &[&str], deps: &[&str]) -> Slice {
+        let mut s = make_slice(id, title, members);
+        s.depends_on = deps.iter().map(|d| d.to_string()).collect();
+        s
+    }
+
+    #[test]
+    fn compare_depends_on_changed() {
+        let units = vec![make_unit("path:src/a.rs", "core")];
+        let old_slices = vec![make_slice("s", "S", &["path:src/a.rs"])];
+        let new_slices = vec![make_slice_with_deps(
+            "s",
+            "S",
+            &["path:src/a.rs"],
+            &["other"],
+        )];
+        let old = make_plan("aaa", "bbb", units.clone(), old_slices);
+        let new = make_plan("aaa", "bbb", units, new_slices);
+
+        let cmp = compare_plans(&old, &new);
+        assert!(cmp.slices_unchanged.is_empty());
+        assert_eq!(cmp.slices_modified.len(), 1);
+        let diff = &cmp.slices_modified[0];
+        assert!(diff.depends_on_changed);
+        assert!(!diff.title_changed);
+        assert!(diff.members_added.is_empty());
+        assert!(diff.members_removed.is_empty());
+    }
+
+    #[test]
+    fn compare_depends_on_unchanged() {
+        let units = vec![make_unit("path:src/a.rs", "core")];
+        let old_slices = vec![make_slice_with_deps("s", "S", &["path:src/a.rs"], &["dep"])];
+        let new_slices = vec![make_slice_with_deps("s", "S", &["path:src/a.rs"], &["dep"])];
+        let old = make_plan("aaa", "bbb", units.clone(), old_slices);
+        let new = make_plan("aaa", "bbb", units, new_slices);
+
+        let cmp = compare_plans(&old, &new);
+        assert_eq!(cmp.slices_unchanged, vec!["s"]);
+        assert!(cmp.slices_modified.is_empty());
+    }
+
+    #[test]
+    fn compare_source_changed_via_repo_root() {
+        let units = vec![make_unit("path:src/a.rs", "core")];
+        let slices = vec![make_slice("s", "S", &["path:src/a.rs"])];
+        let mut old = make_plan("aaa", "bbb", units.clone(), slices.clone());
+        let new = make_plan("aaa", "bbb", units, slices);
+        old.source.repo_root = Some("/old/root".to_string());
+
+        let cmp = compare_plans(&old, &new);
+        assert!(cmp.source_changed);
+    }
+
+    #[test]
+    fn compare_duplicate_slice_ids_uses_first() {
+        let units = vec![make_unit("path:src/a.rs", "core")];
+        let old_slices = vec![
+            make_slice("dup", "First", &["path:src/a.rs"]),
+            make_slice("dup", "Second", &["path:src/a.rs"]),
+        ];
+        let new_slices = vec![make_slice("dup", "First", &["path:src/a.rs"])];
+        let old = make_plan("aaa", "bbb", units.clone(), old_slices);
+        let new = make_plan("aaa", "bbb", units, new_slices);
+
+        let cmp = compare_plans(&old, &new);
+        // First occurrence ("First") matches new ("First") => unchanged
+        assert_eq!(cmp.slices_unchanged, vec!["dup"]);
     }
 
     #[test]
