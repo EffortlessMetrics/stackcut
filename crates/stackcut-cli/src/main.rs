@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde::de::DeserializeOwned;
 use stackcut_artifact::{
-    compute_fingerprint, read_plan, render_summary, scaffold_overrides, write_diagnostics_envelope,
-    write_plan, write_summary,
+    compare_plans, compute_fingerprint, read_plan, render_comparison, render_summary,
+    scaffold_overrides, write_diagnostics_envelope, write_plan, write_summary,
 };
 use stackcut_core::{
     parse_config, plan as build_plan, structural_validate, DiagnosticLevel, Overrides,
@@ -71,6 +71,16 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Compare two stack plans and show what changed.
+    Compare {
+        /// Path to the old (baseline) plan.json.
+        old: PathBuf,
+        /// Path to the new plan.json.
+        new: PathBuf,
+        /// Output comparison as JSON instead of Markdown.
+        #[arg(long)]
+        json: bool,
+    },
     /// Initialize stackcut in a repository.
     Init {
         /// Repository path.
@@ -130,6 +140,7 @@ fn run() -> Result<i32> {
             out_dir,
             dry_run,
         } => cmd_materialize(&plan, &out_dir, dry_run),
+        Commands::Compare { old, new, json } => cmd_compare(&old, &new, json),
         Commands::Init { repo, force } => cmd_init(&repo, force),
         Commands::ScaffoldOverrides {
             plan,
@@ -270,6 +281,20 @@ fn cmd_materialize(plan_path: &Path, out_dir: &Path, dry_run: bool) -> Result<i3
     let written = stackcut_git::materialize_patches(&repo_root, &plan, out_dir, dry_run)?;
     for path in written {
         println!("{}", path.display());
+    }
+    Ok(ExitCode::Success as i32)
+}
+
+fn cmd_compare(old_path: &Path, new_path: &Path, json: bool) -> Result<i32> {
+    let old_plan = read_plan(old_path)?;
+    let new_plan = read_plan(new_path)?;
+    let comparison = compare_plans(&old_plan, &new_plan);
+    if json {
+        let output = serde_json::to_string_pretty(&comparison)
+            .context("failed to serialize comparison as JSON")?;
+        println!("{output}");
+    } else {
+        print!("{}", render_comparison(&comparison));
     }
     Ok(ExitCode::Success as i32)
 }
@@ -738,6 +763,65 @@ mod tests {
                 result
             );
         }
+    }
+
+    // ── compare subcommand tests ───────────────────────────────────────────
+
+    #[test]
+    fn cli_has_compare_subcommand() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let names: Vec<&str> = cmd.get_subcommands().map(|s| s.get_name()).collect();
+        assert!(
+            names.contains(&"compare"),
+            "CLI missing 'compare' subcommand"
+        );
+    }
+
+    #[test]
+    fn compare_subcommand_has_json_flag() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let compare = cmd
+            .get_subcommands()
+            .find(|s| s.get_name() == "compare")
+            .expect("compare subcommand not found");
+        let arg_names: Vec<&str> = compare
+            .get_arguments()
+            .map(|a| a.get_id().as_str())
+            .collect();
+        assert!(
+            arg_names.contains(&"json"),
+            "compare subcommand missing --json flag"
+        );
+    }
+
+    #[test]
+    fn cmd_compare_returns_success() {
+        let plan = minimal_plan(PLAN_VERSION);
+        let dir = tempfile::tempdir().unwrap();
+        let old_path = dir.path().join("old.json");
+        let new_path = dir.path().join("new.json");
+        let json = serde_json::to_string_pretty(&plan).unwrap();
+        std::fs::write(&old_path, format!("{json}\n")).unwrap();
+        std::fs::write(&new_path, format!("{json}\n")).unwrap();
+
+        let result = cmd_compare(&old_path, &new_path, false).unwrap();
+        assert_eq!(result, ExitCode::Success as i32);
+    }
+
+    #[test]
+    fn cmd_compare_json_returns_success() {
+        let plan = minimal_plan(PLAN_VERSION);
+        let dir = tempfile::tempdir().unwrap();
+        let old_path = dir.path().join("old.json");
+        let new_path = dir.path().join("new.json");
+        let json = serde_json::to_string_pretty(&plan).unwrap();
+        std::fs::write(&old_path, format!("{json}\n")).unwrap();
+        std::fs::write(&new_path, format!("{json}\n")).unwrap();
+
+        let result = cmd_compare(&old_path, &new_path, true).unwrap();
+        assert_eq!(result, ExitCode::Success as i32);
     }
 
     // ── Init command tests ─────────────────────────────────────────────
