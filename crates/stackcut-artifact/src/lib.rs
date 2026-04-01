@@ -460,6 +460,146 @@ fn format_unit_kind(kind: &stackcut_core::UnitKind) -> &'static str {
     }
 }
 
+pub fn render_proof_hints(plan: &Plan) -> String {
+    use stackcut_core::{SliceKind, UnitKind};
+    use std::collections::HashMap;
+
+    let units_by_id: HashMap<&str, &stackcut_core::EditUnit> =
+        plan.units.iter().map(|u| (u.id.as_str(), u)).collect();
+
+    let mut output = String::new();
+    output.push_str("# Proof Surface\n");
+
+    for (i, slice) in plan.slices.iter().enumerate() {
+        if i > 0 {
+            output.push_str("\n---\n");
+        }
+        output.push_str(&format!("\n## `{}` — {}\n", slice.id, slice.title));
+
+        // Files changed
+        output.push_str("\n### Files changed\n");
+        for member_id in &slice.members {
+            if let Some(unit) = units_by_id.get(member_id.as_str()) {
+                let kind_label = match unit.kind {
+                    UnitKind::Behavior => "behavior",
+                    UnitKind::Mechanical => "mechanical",
+                    UnitKind::Test => "test",
+                    UnitKind::Documentation => "documentation",
+                    UnitKind::Generated => "generated",
+                    UnitKind::Manifest => "manifest",
+                    UnitKind::Lockfile => "lockfile",
+                    UnitKind::OpsConfig => "ops-config",
+                };
+                let status_label = match unit.status {
+                    stackcut_core::ChangeStatus::Added => "added",
+                    stackcut_core::ChangeStatus::Modified => "modified",
+                    stackcut_core::ChangeStatus::Deleted => "deleted",
+                    stackcut_core::ChangeStatus::Renamed => "renamed",
+                    stackcut_core::ChangeStatus::Copied => "copied",
+                    stackcut_core::ChangeStatus::Unknown => "unknown",
+                };
+                output.push_str(&format!(
+                    "- `{}` ({}, {})\n",
+                    unit.path, kind_label, status_label
+                ));
+            }
+        }
+
+        // Suggested verifications based on slice kind
+        output.push_str("\n### Suggested verifications\n");
+        match slice.kind {
+            SliceKind::Behavior => {
+                for family in &slice.families {
+                    output.push_str(&format!(
+                        "- [ ] Run tests covering the `{}` family\n",
+                        family
+                    ));
+                }
+                for member_id in &slice.members {
+                    if let Some(unit) = units_by_id.get(member_id.as_str()) {
+                        if unit.kind == UnitKind::Behavior {
+                            output.push_str(&format!(
+                                "- [ ] Review behavioral changes in `{}`\n",
+                                unit.path
+                            ));
+                        }
+                    }
+                }
+            }
+            SliceKind::ApiSchema => {
+                output.push_str("- [ ] Verify dependency changes are intentional\n");
+                output.push_str("- [ ] Check for version bumps or new dependencies\n");
+            }
+            SliceKind::TestsDocs => {
+                output.push_str("- [ ] Verify test coverage is maintained\n");
+                output.push_str("- [ ] Review documentation accuracy\n");
+            }
+            SliceKind::OpsConfig => {
+                output.push_str("- [ ] Verify CI/CD changes are intentional\n");
+                output.push_str("- [ ] Check for environment-specific impacts\n");
+            }
+            SliceKind::Mechanical | SliceKind::PrepRefactor => {
+                output.push_str("- [ ] Verify renames don't break imports\n");
+                output.push_str("- [ ] Check for stale references\n");
+            }
+            SliceKind::Generated => {
+                output.push_str("- [ ] Verify generated output matches source\n");
+            }
+            SliceKind::Misc => {
+                output.push_str("- [ ] Review changes for correctness\n");
+            }
+        }
+
+        // Handle manifest/lockfile units within any slice
+        let has_manifest = slice.members.iter().any(|m| {
+            units_by_id
+                .get(m.as_str())
+                .is_some_and(|u| u.kind == UnitKind::Manifest || u.kind == UnitKind::Lockfile)
+        });
+        if has_manifest && slice.kind != SliceKind::ApiSchema {
+            output.push_str("- [ ] Verify dependency changes are intentional\n");
+            output.push_str("- [ ] Check for version bumps or new dependencies\n");
+        }
+
+        // Explicit proof commands from proof_surface
+        if !slice.proof_surface.expected_commands.is_empty() {
+            output.push_str("\n### Proof commands\n");
+            for cmd in &slice.proof_surface.expected_commands {
+                output.push_str(&format!("- [ ] `{}`\n", cmd));
+            }
+        }
+
+        // Linked scenarios from proof_surface
+        if !slice.proof_surface.scenario_ids.is_empty() {
+            output.push_str("\n### Linked scenarios\n");
+            for scenario in &slice.proof_surface.scenario_ids {
+                output.push_str(&format!("- {}\n", scenario));
+            }
+        }
+
+        // Safety nets
+        output.push_str("\n### Safety nets\n");
+
+        // Suggest cargo test -p {crate} when family maps to a known crate
+        let mut suggested_crates = Vec::new();
+        for family in &slice.families {
+            let crate_name = format!("stackcut-{}", family);
+            if !suggested_crates.contains(&crate_name) {
+                output.push_str(&format!(
+                    "- [ ] `cargo test -p {}` — unit tests for {}\n",
+                    crate_name, family
+                ));
+                suggested_crates.push(crate_name);
+            }
+        }
+
+        output.push_str("- [ ] Structural validation passes\n");
+        output.push_str("- [ ] Exact recomposition passes\n");
+    }
+
+    output
+}
+
 pub fn render_summary(plan: &Plan) -> String {
     let mut output = String::new();
 
@@ -1525,6 +1665,78 @@ mod tests {
         }
     }
 
+    // ── Proof hints tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn proof_hints_contain_all_slice_ids() {
+        let plan = Plan {
+            version: "0.1.0".to_string(),
+            source: PlanSource {
+                repo_root: None,
+                base: "base".to_string(),
+                head: "head".to_string(),
+                head_tree: None,
+            },
+            units: vec![
+                EditUnit {
+                    id: "path:src/core/planner.rs".to_string(),
+                    path: "src/core/planner.rs".to_string(),
+                    old_path: None,
+                    status: ChangeStatus::Modified,
+                    kind: UnitKind::Behavior,
+                    family: "core".to_string(),
+                    notes: Vec::new(),
+                },
+                EditUnit {
+                    id: "path:Cargo.toml".to_string(),
+                    path: "Cargo.toml".to_string(),
+                    old_path: None,
+                    status: ChangeStatus::Modified,
+                    kind: UnitKind::Manifest,
+                    family: "workspace".to_string(),
+                    notes: Vec::new(),
+                },
+            ],
+            slices: vec![
+                Slice {
+                    id: "behavior-core".to_string(),
+                    title: "Behavior: core".to_string(),
+                    kind: SliceKind::Behavior,
+                    families: vec!["core".to_string()],
+                    members: vec!["path:src/core/planner.rs".to_string()],
+                    depends_on: Vec::new(),
+                    reasons: Vec::new(),
+                    proof_surface: ProofSurface::default(),
+                    fingerprint: None,
+                },
+                Slice {
+                    id: "api-schema-workspace".to_string(),
+                    title: "Manifest and lockstep package metadata".to_string(),
+                    kind: SliceKind::ApiSchema,
+                    families: vec!["workspace".to_string()],
+                    members: vec!["path:Cargo.toml".to_string()],
+                    depends_on: Vec::new(),
+                    reasons: Vec::new(),
+                    proof_surface: ProofSurface::default(),
+                    fingerprint: None,
+                },
+            ],
+            ambiguities: Vec::new(),
+            diagnostics: Vec::new(),
+            fingerprint: None,
+            override_fingerprint: None,
+        };
+
+        let rendered = render_proof_hints(&plan);
+        for slice in &plan.slices {
+            assert!(
+                rendered.contains(&slice.id),
+                "proof hints missing slice ID '{}'",
+                slice.id
+            );
+        }
+    }
+
     #[test]
     fn compare_identical_plans() {
         let units = vec![make_unit("path:src/a.rs", "core")];
@@ -2054,6 +2266,100 @@ mod tests {
     }
 
     #[test]
+    fn proof_hints_behavior_slice_gets_run_tests() {
+        let plan = Plan {
+            version: "0.1.0".to_string(),
+            source: PlanSource {
+                repo_root: None,
+                base: "base".to_string(),
+                head: "head".to_string(),
+                head_tree: None,
+            },
+            units: vec![EditUnit {
+                id: "path:src/core/planner.rs".to_string(),
+                path: "src/core/planner.rs".to_string(),
+                old_path: None,
+                status: ChangeStatus::Modified,
+                kind: UnitKind::Behavior,
+                family: "core".to_string(),
+                notes: Vec::new(),
+            }],
+            slices: vec![Slice {
+                id: "behavior-core".to_string(),
+                title: "Behavior: core".to_string(),
+                kind: SliceKind::Behavior,
+                families: vec!["core".to_string()],
+                members: vec!["path:src/core/planner.rs".to_string()],
+                depends_on: Vec::new(),
+                reasons: Vec::new(),
+                proof_surface: ProofSurface::default(),
+                fingerprint: None,
+            }],
+            ambiguities: Vec::new(),
+            diagnostics: Vec::new(),
+            fingerprint: None,
+            override_fingerprint: None,
+        };
+
+        let rendered = render_proof_hints(&plan);
+        assert!(
+            rendered.contains("Run tests covering the `core` family"),
+            "behavior slice should suggest running tests"
+        );
+        assert!(
+            rendered.contains("Review behavioral changes in `src/core/planner.rs`"),
+            "behavior slice should suggest reviewing behavioral changes"
+        );
+    }
+
+    #[test]
+    fn proof_hints_manifest_slice_gets_dependency_verification() {
+        let plan = Plan {
+            version: "0.1.0".to_string(),
+            source: PlanSource {
+                repo_root: None,
+                base: "base".to_string(),
+                head: "head".to_string(),
+                head_tree: None,
+            },
+            units: vec![EditUnit {
+                id: "path:Cargo.toml".to_string(),
+                path: "Cargo.toml".to_string(),
+                old_path: None,
+                status: ChangeStatus::Modified,
+                kind: UnitKind::Manifest,
+                family: "workspace".to_string(),
+                notes: Vec::new(),
+            }],
+            slices: vec![Slice {
+                id: "api-schema-workspace".to_string(),
+                title: "Manifest and lockstep package metadata".to_string(),
+                kind: SliceKind::ApiSchema,
+                families: vec!["workspace".to_string()],
+                members: vec!["path:Cargo.toml".to_string()],
+                depends_on: Vec::new(),
+                reasons: Vec::new(),
+                proof_surface: ProofSurface::default(),
+                fingerprint: None,
+            }],
+            ambiguities: Vec::new(),
+            diagnostics: Vec::new(),
+            fingerprint: None,
+            override_fingerprint: None,
+        };
+
+        let rendered = render_proof_hints(&plan);
+        assert!(
+            rendered.contains("Verify dependency changes are intentional"),
+            "manifest slice should suggest dependency verification"
+        );
+        assert!(
+            rendered.contains("Check for version bumps or new dependencies"),
+            "manifest slice should suggest checking version bumps"
+        );
+    }
+
+    #[test]
     fn scaffold_output_always_starts_with_version() {
         // Plan with no ambiguities
         let plan = minimal_plan_for_scaffold();
@@ -2421,6 +2727,54 @@ mod tests {
     }
 
     #[test]
+    fn proof_hints_non_empty_for_any_non_empty_plan() {
+        // Use a minimal plan with one slice
+        let plan = Plan {
+            version: "0.1.0".to_string(),
+            source: PlanSource {
+                repo_root: None,
+                base: "base".to_string(),
+                head: "head".to_string(),
+                head_tree: None,
+            },
+            units: vec![EditUnit {
+                id: "path:README.md".to_string(),
+                path: "README.md".to_string(),
+                old_path: None,
+                status: ChangeStatus::Modified,
+                kind: UnitKind::Documentation,
+                family: "docs".to_string(),
+                notes: Vec::new(),
+            }],
+            slices: vec![Slice {
+                id: "tests-docs-docs".to_string(),
+                title: "Tests/docs: docs".to_string(),
+                kind: SliceKind::TestsDocs,
+                families: vec!["docs".to_string()],
+                members: vec!["path:README.md".to_string()],
+                depends_on: Vec::new(),
+                reasons: Vec::new(),
+                proof_surface: ProofSurface::default(),
+                fingerprint: None,
+            }],
+            ambiguities: Vec::new(),
+            diagnostics: Vec::new(),
+            fingerprint: None,
+            override_fingerprint: None,
+        };
+
+        let rendered = render_proof_hints(&plan);
+        assert!(
+            !rendered.is_empty(),
+            "proof hints should be non-empty for a non-empty plan"
+        );
+        assert!(
+            rendered.contains("# Proof Surface"),
+            "proof hints should contain the header"
+        );
+    }
+
+    #[test]
     fn sarif_has_correct_schema_and_version() {
         let plan = empty_plan();
         let sarif = render_sarif(&plan);
@@ -2596,5 +2950,24 @@ mod tests {
         let plan = test_plan_with_deps();
         let result = render_slice_explanation(&plan, "nonexistent-slice");
         assert!(result.is_none());
+    }
+
+    // Property test: proof hints are non-empty for any non-empty plan
+    proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(50))]
+
+        #[test]
+        fn prop_proof_hints_non_empty_for_non_empty_plan(plan in arb_plan()) {
+            let rendered = render_proof_hints(&plan);
+            prop_assert!(!rendered.is_empty(), "proof hints should be non-empty for any plan with slices");
+            prop_assert!(rendered.contains("# Proof Surface"), "proof hints should contain the header");
+            // Every slice ID should appear in the output
+            for slice in &plan.slices {
+                prop_assert!(
+                    rendered.contains(&slice.id),
+                    "proof hints missing slice ID '{}'", slice.id
+                );
+            }
+        }
     }
 }

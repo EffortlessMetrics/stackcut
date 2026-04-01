@@ -2,10 +2,11 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde::de::DeserializeOwned;
 use stackcut_artifact::{
-    compare_plans, compute_fingerprint, read_plan, render_comparison, render_sarif,
-    render_slice_explanation, render_summary, scaffold_overrides, write_diagnostics_envelope,
-    write_plan, write_receipt, write_summary, FingerprintCheck, RecompositionReceipt,
-    RecompositionStatus, RecompositionVerdict, SliceHash, StructuralResult, ValidationResult,
+    compare_plans, compute_fingerprint, read_plan, render_comparison, render_proof_hints,
+    render_sarif, render_slice_explanation, render_summary, scaffold_overrides,
+    write_diagnostics_envelope, write_plan, write_receipt, write_summary, FingerprintCheck,
+    RecompositionReceipt, RecompositionStatus, RecompositionVerdict, SliceHash, StructuralResult,
+    ValidationResult,
 };
 use stackcut_core::{
     parse_config, plan as build_plan, structural_validate, DiagnosticLevel, Overrides,
@@ -136,6 +137,14 @@ enum Commands {
         #[arg(long, short)]
         output: Option<PathBuf>,
     },
+    /// Emit proof surface hints for each slice.
+    EmitProof {
+        /// Path to the plan.json.
+        plan: PathBuf,
+        /// Write to file instead of stdout.
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -191,6 +200,7 @@ fn run() -> Result<i32> {
             force,
         } => cmd_scaffold_overrides(&plan, &output, force),
         Commands::EmitSarif { plan, output } => cmd_emit_sarif(&plan, output.as_deref()),
+        Commands::EmitProof { plan, output } => cmd_emit_proof(&plan, output.as_deref()),
     }
 }
 
@@ -1076,6 +1086,29 @@ fn cmd_scaffold_overrides(plan_path: &Path, output: &Path, force: bool) -> Resul
         .with_context(|| format!("failed to write {}", output.display()))?;
 
     println!("wrote {}", output.display());
+
+    Ok(ExitCode::Success as i32)
+}
+
+fn cmd_emit_proof(plan_path: &Path, output: Option<&Path>) -> Result<i32> {
+    let plan = read_plan(plan_path)?;
+    let hints = render_proof_hints(&plan);
+
+    match output {
+        Some(out_path) => {
+            if let Some(parent) = out_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create directory {}", parent.display()))?;
+            }
+            fs::write(out_path, &hints)
+                .with_context(|| format!("failed to write {}", out_path.display()))?;
+            println!("wrote {}", out_path.display());
+        }
+        None => {
+            print!("{}", hints);
+        }
+    }
+
     Ok(ExitCode::Success as i32)
 }
 
@@ -1221,6 +1254,10 @@ mod tests {
             subcommand_names.contains(&"emit-sarif"),
             "CLI missing 'emit-sarif' subcommand"
         );
+        assert!(
+            subcommand_names.contains(&"emit-proof"),
+            "CLI missing 'emit-proof' subcommand"
+        );
     }
 
     #[test]
@@ -1254,6 +1291,10 @@ mod tests {
         assert!(
             help.contains("scaffold-overrides"),
             "Root help missing 'scaffold-overrides' subcommand"
+        );
+        assert!(
+            help.contains("emit-proof"),
+            "Root help missing 'emit-proof' subcommand"
         );
 
         // Stability: generating help twice produces identical output
@@ -1319,6 +1360,16 @@ mod tests {
                     assert!(
                         help.contains("--force"),
                         "scaffold-overrides help missing --force"
+                    );
+                }
+                "emit-proof" => {
+                    assert!(
+                        help.contains("<PLAN>") || help.contains("plan"),
+                        "emit-proof help missing plan argument"
+                    );
+                    assert!(
+                        help.contains("--output"),
+                        "emit-proof help missing --output"
                     );
                 }
                 _ => {} // help subcommand auto-added by clap
