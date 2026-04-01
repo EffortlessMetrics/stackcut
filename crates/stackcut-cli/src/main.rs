@@ -276,7 +276,7 @@ fn cmd_scaffold_overrides(plan_path: &Path, output: &Path, force: bool) -> Resul
         return Ok(ExitCode::StructuralError as i32);
     }
 
-    if let Some(parent) = output.parent() {
+    if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }

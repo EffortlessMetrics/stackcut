@@ -50,6 +50,12 @@ pub fn write_plan(path: &Path, plan: &Plan) -> Result<()> {
     Ok(())
 }
 
+/// Escape a string for use as a TOML quoted value.
+/// Handles `\` → `\\` and `"` → `\"`.
+fn escape_toml_value(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 pub fn scaffold_overrides(plan: &Plan) -> String {
     let mut out = String::new();
 
@@ -87,19 +93,22 @@ pub fn scaffold_overrides(plan: &Plan) -> String {
 
             for unit in &ambiguity.affected_units {
                 out.push_str("# [[force_members]]\n");
-                out.push_str(&format!("# member = \"{}\"\n", unit));
+                out.push_str(&format!("# member = \"{}\"\n", escape_toml_value(unit)));
                 if alternatives.is_empty() {
-                    out.push_str(&format!("# slice = \"{}\"\n", target_slice));
+                    out.push_str(&format!(
+                        "# slice = \"{}\"\n",
+                        escape_toml_value(&target_slice)
+                    ));
                 } else {
                     out.push_str(&format!(
                         "# slice = \"{}\"  # or: {}\n",
-                        target_slice,
+                        escape_toml_value(&target_slice),
                         alternatives.join(", ")
                     ));
                 }
                 out.push_str(&format!(
                     "# reason = \"Resolve ambiguity: attach {} to preferred slice\"\n",
-                    unit
+                    escape_toml_value(unit)
                 ));
             }
 
@@ -111,7 +120,7 @@ pub fn scaffold_overrides(plan: &Plan) -> String {
                     ambiguity
                         .affected_units
                         .iter()
-                        .map(|u| format!("\"{}\"", u))
+                        .map(|u| format!("\"{}\"", escape_toml_value(u)))
                         .collect::<Vec<_>>()
                         .join(", ")
                 ));
@@ -126,8 +135,11 @@ pub fn scaffold_overrides(plan: &Plan) -> String {
         out.push_str("# Uncomment to give slices more descriptive titles.\n");
         for slice in &plan.slices {
             out.push_str("# [[rename_slices]]\n");
-            out.push_str(&format!("# id = \"{}\"\n", slice.id));
-            out.push_str(&format!("# title = \"{}\"\n", slice.title));
+            out.push_str(&format!("# id = \"{}\"\n", escape_toml_value(&slice.id)));
+            out.push_str(&format!(
+                "# title = \"{}\"\n",
+                escape_toml_value(&slice.title)
+            ));
         }
     }
 
@@ -149,11 +161,12 @@ pub fn scaffold_overrides(plan: &Plan) -> String {
         out.push_str("# Uncomment to enforce review order between slices.\n");
         for (before, after) in &ordering_pairs {
             out.push_str("# [[must_order]]\n");
-            out.push_str(&format!("# before = \"{}\"\n", before));
-            out.push_str(&format!("# after = \"{}\"\n", after));
+            out.push_str(&format!("# before = \"{}\"\n", escape_toml_value(before)));
+            out.push_str(&format!("# after = \"{}\"\n", escape_toml_value(after)));
             out.push_str(&format!(
                 "# reason = \"{} should land before {}\"\n",
-                before, after
+                escape_toml_value(before),
+                escape_toml_value(after)
             ));
         }
     }
@@ -1022,6 +1035,34 @@ mod tests {
         assert!(
             output.contains("must_link"),
             "scaffold output missing must_link for multi-unit ambiguity"
+        );
+    }
+
+    #[test]
+    fn escape_toml_value_handles_special_chars() {
+        assert_eq!(escape_toml_value("plain"), "plain");
+        assert_eq!(escape_toml_value(r#"has"quote"#), r#"has\"quote"#);
+        assert_eq!(escape_toml_value(r"has\backslash"), r"has\\backslash");
+        assert_eq!(escape_toml_value(r#"both\"chars"#), r#"both\\\"chars"#);
+    }
+
+    #[test]
+    fn scaffold_escapes_special_chars_in_ids() {
+        let mut plan = minimal_plan_for_scaffold();
+        plan.slices[0].id = r#"slice-with"quote"#.to_string();
+        plan.slices[0].title = r#"Title with "quotes" and \backslash"#.to_string();
+
+        let output = scaffold_overrides(&plan);
+
+        assert!(
+            output.contains(r#"# id = "slice-with\"quote""#),
+            "scaffold output should escape quotes in slice id: {}",
+            output
+        );
+        assert!(
+            output.contains(r#"# title = "Title with \"quotes\" and \\backslash""#),
+            "scaffold output should escape quotes and backslashes in title: {}",
+            output
         );
     }
 
