@@ -30,15 +30,16 @@ Do not introduce reverse edges into `stackcut-core`.
 
 ## Required commands
 
-Use the stable command surface:
+Use the stable command surface (`cargo xtask` is an alias defined in `.cargo/config.toml`):
 
-- `cargo run -p xtask -- ci-fast`
-- `cargo run -p xtask -- ci-full`
-- `cargo run -p xtask -- smoke`
-- `cargo run -p xtask -- golden`
-- `cargo run -p xtask -- mutants`
-- `cargo run -p xtask -- docs-check`
-- `cargo run -p xtask -- release-check`
+- `cargo xtask ci-fast`
+- `cargo xtask ci-full`
+- `cargo xtask smoke`
+- `cargo xtask golden`
+- `cargo xtask mutants`
+- `cargo xtask fuzz`
+- `cargo xtask docs-check`
+- `cargo xtask release-check`
 
 ## How to work
 
