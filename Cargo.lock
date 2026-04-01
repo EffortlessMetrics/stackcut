@@ -715,6 +715,7 @@ name = "stackcut-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "proptest",
  "serde",
@@ -744,6 +745,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "proptest",
+ "sha2",
  "stackcut-core",
  "tempfile",
 ]

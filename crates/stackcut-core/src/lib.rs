@@ -440,7 +440,7 @@ fn infer_owner_by_path_segment(
 
     let mut candidates = Vec::new();
     for (family, slice_id) in family_to_slice {
-        if segments.iter().any(|seg| *seg == family.as_str()) || stem == family.as_str() {
+        if segments.contains(&family.as_str()) || stem == family.as_str() {
             candidates.push(slice_id.clone());
         }
     }
@@ -1648,8 +1648,10 @@ another_bad_key = 42
                 "core",
             ),
         ];
-        let mut config = StackcutConfig::default();
-        config.review_budget = Some(2); // budget of 2, slice has 3
+        let config = StackcutConfig {
+            review_budget: Some(2), // budget of 2, slice has 3
+            ..StackcutConfig::default()
+        };
 
         let result = plan(source, units, &config, &Overrides::default());
         let budget_diags: Vec<_> = result
@@ -1717,8 +1719,10 @@ another_bad_key = 42
                 "core",
             ),
         ];
-        let mut config = StackcutConfig::default();
-        config.review_budget = Some(5);
+        let config = StackcutConfig {
+            review_budget: Some(5),
+            ..StackcutConfig::default()
+        };
 
         let result = plan(source, units, &config, &Overrides::default());
         assert!(!result
@@ -2806,8 +2810,10 @@ another_bad_key = 42
                 })
                 .collect();
 
-            let mut config = StackcutConfig::default();
-            config.review_budget = Some(budget);
+            let config = StackcutConfig {
+                review_budget: Some(budget),
+                ..StackcutConfig::default()
+            };
 
             let result = plan(source, units, &config, &Overrides::default());
 
@@ -3446,7 +3452,7 @@ another_bad_key = 42
             }
 
             // No extra IDs in slices that aren't in the input units
-            for (member, _) in &member_counts {
+            for member in member_counts.keys() {
                 prop_assert!(
                     unit_ids.contains(member),
                     "Slice member '{}' is not in the input units",
@@ -3627,7 +3633,7 @@ another_bad_key = 42
             }
 
             // No extra IDs in slices that aren't in the input units
-            for (member, _) in &member_counts {
+            for member in member_counts.keys() {
                 prop_assert!(
                     unit_id_set.contains(member),
                     "After overrides, slice member '{}' is not in the input units",
