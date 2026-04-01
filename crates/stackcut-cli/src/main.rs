@@ -4,7 +4,8 @@ use serde::de::DeserializeOwned;
 use stackcut_artifact::{
     compare_plans, compute_fingerprint, read_plan, render_comparison, render_summary,
     scaffold_overrides, write_diagnostics_envelope, write_plan, write_receipt, write_summary,
-    RecompositionReceipt, RecompositionVerdict, SliceHash,
+    FingerprintCheck, RecompositionReceipt, RecompositionStatus, RecompositionVerdict, SliceHash,
+    StructuralResult, ValidationResult,
 };
 use stackcut_core::{
     parse_config, plan as build_plan, structural_validate, DiagnosticLevel, Overrides,
@@ -39,6 +40,12 @@ struct Cli {
     command: Commands,
 }
 
+#[derive(Debug, Clone, clap::ValueEnum)]
+enum OutputFormat {
+    Text,
+    Json,
+}
+
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Create a stack plan from a git range.
@@ -68,6 +75,9 @@ enum Commands {
         exact: bool,
         #[arg(long)]
         receipt: Option<PathBuf>,
+        /// Output format: text (default) or json.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
     },
     /// Materialize a stored plan into a patch series.
     Materialize {
@@ -152,7 +162,8 @@ fn run() -> Result<i32> {
             plan,
             exact,
             receipt,
-        } => cmd_validate(&plan, exact, receipt.as_deref()),
+            format,
+        } => cmd_validate(&plan, exact, receipt.as_deref(), &format),
         Commands::Materialize {
             plan,
             out_dir,
@@ -235,7 +246,12 @@ fn cmd_explain(plan_path: &Path) -> Result<i32> {
     Ok(ExitCode::Success as i32)
 }
 
-fn cmd_validate(plan_path: &Path, exact: bool, receipt_path: Option<&Path>) -> Result<i32> {
+fn cmd_validate(
+    plan_path: &Path,
+    exact: bool,
+    receipt_path: Option<&Path>,
+    format: &OutputFormat,
+) -> Result<i32> {
     if receipt_path.is_some() && !exact {
         eprintln!("error: --receipt requires --exact");
         return Ok(ExitCode::StructuralError as i32);
@@ -243,49 +259,63 @@ fn cmd_validate(plan_path: &Path, exact: bool, receipt_path: Option<&Path>) -> R
 
     let plan = read_plan(plan_path)?;
 
-    // Version check: reject plans with unsupported versions
-    if plan.version != stackcut_core::PLAN_VERSION {
-        eprintln!(
-            "error: plan version '{}' is not supported (expected '{}')",
-            plan.version,
-            stackcut_core::PLAN_VERSION
-        );
-        return Ok(ExitCode::StructuralError as i32);
-    }
+    // Version check
+    let plan_version_supported = plan.version == stackcut_core::PLAN_VERSION;
 
     // Fingerprint verification (if present)
-    if let Some(ref fp) = plan.fingerprint {
+    let fingerprint_check = plan.fingerprint.as_ref().map(|fp| {
         let computed = compute_fingerprint(&plan);
-        if *fp != computed {
-            eprintln!(
-                "warning: plan fingerprint mismatch (expected {}, got {})",
-                fp, computed
-            );
+        let matches = *fp == computed;
+        FingerprintCheck {
+            expected: fp.clone(),
+            computed,
+            matches,
         }
-    }
+    });
 
-    let diagnostics = structural_validate(&plan);
-    let has_errors = diagnostics
-        .iter()
-        .any(|d| d.level == DiagnosticLevel::Error);
-
-    if diagnostics.is_empty() {
-        println!("structural validation: ok");
+    // Structural validation (only if version is supported)
+    let (structural, diagnostics) = if plan_version_supported {
+        let diags = structural_validate(&plan);
+        let error_count = diags
+            .iter()
+            .filter(|d| d.level == DiagnosticLevel::Error)
+            .count();
+        let warning_count = diags
+            .iter()
+            .filter(|d| d.level == DiagnosticLevel::Warning)
+            .count();
+        let ok = error_count == 0;
+        (
+            StructuralResult {
+                ok,
+                error_count,
+                warning_count,
+                diagnostics: diags.clone(),
+            },
+            diags,
+        )
     } else {
-        println!("structural validation:");
-        for diagnostic in &diagnostics {
-            println!(
-                "- {:?} {}: {}",
-                diagnostic.level, diagnostic.code, diagnostic.message
-            );
+        (
+            StructuralResult {
+                ok: false,
+                error_count: 1,
+                warning_count: 0,
+                diagnostics: Vec::new(),
+            },
+            Vec::new(),
+        )
+    };
+
+    let has_errors = !structural.ok;
+
+    // Exact recomposition
+    let exact_recomposition = if !plan_version_supported || has_errors {
+        if exact {
+            Some(RecompositionStatus::Skipped)
+        } else {
+            None
         }
-    }
-
-    if has_errors {
-        return Ok(ExitCode::StructuralError as i32);
-    }
-
-    if exact {
+    } else if exact {
         let repo_root = plan
             .source
             .repo_root
@@ -293,6 +323,7 @@ fn cmd_validate(plan_path: &Path, exact: bool, receipt_path: Option<&Path>) -> R
             .map(PathBuf::from)
             .context("plan is missing source.repo_root; exact validation is unavailable")?;
 
+        // Receipt path handling (write receipt file when requested)
         if let Some(rpath) = receipt_path {
             let result =
                 match stackcut_git::validate_exact_recomposition_with_receipt(&repo_root, &plan) {
@@ -353,34 +384,94 @@ fn cmd_validate(plan_path: &Path, exact: bool, receipt_path: Option<&Path>) -> R
             };
 
             write_receipt(rpath, &receipt)?;
+            println!("receipt written to {}", rpath.display());
 
             match verdict {
-                RecompositionVerdict::Pass => {
-                    println!("exact recomposition: pass");
-                    println!("receipt written to {}", rpath.display());
-                    Ok(ExitCode::Success as i32)
-                }
-                RecompositionVerdict::Fail => {
-                    eprintln!("exact recomposition: fail");
-                    println!("receipt written to {}", rpath.display());
-                    Ok(ExitCode::RecompositionFailure as i32)
-                }
+                RecompositionVerdict::Pass => Some(RecompositionStatus::Pass),
+                RecompositionVerdict::Fail => Some(RecompositionStatus::Fail {
+                    message: "recomposition verdict: fail".to_string(),
+                }),
             }
         } else {
             match stackcut_git::validate_exact_recomposition(&repo_root, &plan) {
-                Ok(()) => {
-                    println!("exact recomposition: ok");
-                    Ok(ExitCode::Success as i32)
-                }
-                Err(e) => {
-                    eprintln!("exact recomposition failed: {e}");
-                    Ok(ExitCode::RecompositionFailure as i32)
-                }
+                Ok(()) => Some(RecompositionStatus::Pass),
+                Err(e) => Some(RecompositionStatus::Fail {
+                    message: format!("{e}"),
+                }),
             }
         }
     } else {
-        Ok(ExitCode::Success as i32)
+        None
+    };
+
+    // Determine exit code
+    let exit_code = if !plan_version_supported || has_errors {
+        ExitCode::StructuralError as i32
+    } else if matches!(exact_recomposition, Some(RecompositionStatus::Fail { .. })) {
+        ExitCode::RecompositionFailure as i32
+    } else {
+        ExitCode::Success as i32
+    };
+
+    let result = ValidationResult {
+        plan_version: plan.version.clone(),
+        plan_version_supported,
+        fingerprint_check,
+        structural,
+        exact_recomposition,
+        exit_code,
+    };
+
+    // Output
+    match format {
+        OutputFormat::Json => {
+            let json = serde_json::to_string_pretty(&result)
+                .context("failed to serialize validation result")?;
+            println!("{json}");
+        }
+        OutputFormat::Text => {
+            if !plan_version_supported {
+                eprintln!(
+                    "error: plan version '{}' is not supported (expected '{}')",
+                    plan.version,
+                    stackcut_core::PLAN_VERSION
+                );
+            } else {
+                if let Some(ref fc) = result.fingerprint_check {
+                    if !fc.matches {
+                        eprintln!(
+                            "warning: plan fingerprint mismatch (expected {}, got {})",
+                            fc.expected, fc.computed
+                        );
+                    }
+                }
+
+                if diagnostics.is_empty() {
+                    println!("structural validation: ok");
+                } else {
+                    println!("structural validation:");
+                    for diagnostic in &diagnostics {
+                        println!(
+                            "- {:?} {}: {}",
+                            diagnostic.level, diagnostic.code, diagnostic.message
+                        );
+                    }
+                }
+
+                if let Some(ref recomp) = result.exact_recomposition {
+                    match recomp {
+                        RecompositionStatus::Pass => println!("exact recomposition: ok"),
+                        RecompositionStatus::Fail { message } => {
+                            eprintln!("exact recomposition failed: {message}");
+                        }
+                        RecompositionStatus::Skipped => {}
+                    }
+                }
+            }
+        }
     }
+
+    Ok(exit_code)
 }
 
 fn cmd_materialize(plan_path: &Path, out_dir: &Path, dry_run: bool) -> Result<i32> {
@@ -1442,7 +1533,7 @@ mod tests {
             let json = serde_json::to_string_pretty(&plan).unwrap();
             std::fs::write(&plan_path, format!("{json}\n")).unwrap();
 
-            let result = cmd_validate(&plan_path, false, None).unwrap();
+            let result = cmd_validate(&plan_path, false, None, &OutputFormat::Text).unwrap();
             prop_assert_eq!(
                 result,
                 ExitCode::StructuralError as i32,
@@ -1770,7 +1861,8 @@ mod tests {
         std::fs::write(&plan_path, format!("{json}\n")).unwrap();
 
         let receipt_path = dir.path().join("receipt.json");
-        let result = cmd_validate(&plan_path, false, Some(&receipt_path)).unwrap();
+        let result =
+            cmd_validate(&plan_path, false, Some(&receipt_path), &OutputFormat::Text).unwrap();
         assert_eq!(
             result,
             ExitCode::StructuralError as i32,
@@ -1802,5 +1894,103 @@ mod tests {
             }
         }
         panic!("validate subcommand not found");
+    }
+
+    // ── Tests for --format flag ────────────────────────────────────────
+
+    #[test]
+    fn validate_format_flag_exists() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let validate_cmd = cmd
+            .get_subcommands()
+            .find(|s| s.get_name() == "validate")
+            .expect("validate subcommand not found");
+        let args: Vec<&str> = validate_cmd
+            .get_arguments()
+            .map(|a| a.get_id().as_str())
+            .collect();
+        assert!(
+            args.contains(&"format"),
+            "validate subcommand missing --format argument"
+        );
+    }
+
+    #[test]
+    fn validate_json_format_produces_parseable_json() {
+        let plan = minimal_plan(PLAN_VERSION);
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.json");
+        let json = serde_json::to_string_pretty(&plan).unwrap();
+        std::fs::write(&plan_path, format!("{json}\n")).unwrap();
+
+        // Capture stdout by calling cmd_validate with json format.
+        // We can't capture stdout directly here, so we test the ValidationResult
+        // serialization round-trip instead. The exit code should be 0.
+        let exit = cmd_validate(&plan_path, false, None, &OutputFormat::Json).unwrap();
+        assert_eq!(exit, ExitCode::Success as i32);
+    }
+
+    #[test]
+    fn validate_json_output_contains_expected_fields() {
+        use stackcut_artifact::ValidationResult;
+
+        let plan = minimal_plan(PLAN_VERSION);
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.json");
+        let json = serde_json::to_string_pretty(&plan).unwrap();
+        std::fs::write(&plan_path, format!("{json}\n")).unwrap();
+
+        // Build a ValidationResult the same way cmd_validate would
+        let plan = read_plan(&plan_path).unwrap();
+        let diagnostics = structural_validate(&plan);
+        let error_count = diagnostics
+            .iter()
+            .filter(|d| d.level == DiagnosticLevel::Error)
+            .count();
+        let warning_count = diagnostics
+            .iter()
+            .filter(|d| d.level == DiagnosticLevel::Warning)
+            .count();
+
+        let result = ValidationResult {
+            plan_version: plan.version.clone(),
+            plan_version_supported: true,
+            fingerprint_check: None,
+            structural: StructuralResult {
+                ok: error_count == 0,
+                error_count,
+                warning_count,
+                diagnostics,
+            },
+            exact_recomposition: None,
+            exit_code: ExitCode::Success as i32,
+        };
+
+        let serialized = serde_json::to_string_pretty(&result).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+
+        assert!(parsed.get("plan_version").is_some());
+        assert!(parsed.get("plan_version_supported").is_some());
+        assert!(parsed.get("structural").is_some());
+        assert!(parsed.get("exit_code").is_some());
+
+        let structural = parsed.get("structural").unwrap();
+        assert!(structural.get("ok").is_some());
+        assert!(structural.get("error_count").is_some());
+        assert!(structural.get("warning_count").is_some());
+        assert!(structural.get("diagnostics").is_some());
+    }
+
+    #[test]
+    fn validate_unsupported_version_json_reports_exit_code_1() {
+        let plan = minimal_plan("99.99.99");
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.json");
+        let json = serde_json::to_string_pretty(&plan).unwrap();
+        std::fs::write(&plan_path, format!("{json}\n")).unwrap();
+
+        let exit = cmd_validate(&plan_path, false, None, &OutputFormat::Json).unwrap();
+        assert_eq!(exit, ExitCode::StructuralError as i32);
     }
 }

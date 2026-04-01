@@ -63,6 +63,39 @@ pub struct DiagnosticCounts {
     pub notes: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationResult {
+    pub plan_version: String,
+    pub plan_version_supported: bool,
+    pub fingerprint_check: Option<FingerprintCheck>,
+    pub structural: StructuralResult,
+    pub exact_recomposition: Option<RecompositionStatus>,
+    pub exit_code: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FingerprintCheck {
+    pub expected: String,
+    pub computed: String,
+    pub matches: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StructuralResult {
+    pub ok: bool,
+    pub error_count: usize,
+    pub warning_count: usize,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecompositionStatus {
+    Pass,
+    Fail { message: String },
+    Skipped,
+}
+
 pub fn compute_fingerprint(plan: &Plan) -> String {
     let mut plan_copy = plan.clone();
     plan_copy.fingerprint = None;
@@ -1845,6 +1878,7 @@ mod tests {
             ambiguities: Vec::new(),
             diagnostics: Vec::new(),
             fingerprint: None,
+            override_fingerprint: None,
         };
 
         let dir = tempfile::tempdir().unwrap();
@@ -1872,6 +1906,117 @@ mod tests {
                 "slice '{}' fingerprint mismatch",
                 original.id
             );
+        }
+    }
+
+    // ── ValidationResult serialization round-trip ───────────────────────
+
+    #[test]
+    fn validation_result_serialization_round_trip() {
+        let result = ValidationResult {
+            plan_version: "0.1.0".to_string(),
+            plan_version_supported: true,
+            fingerprint_check: Some(FingerprintCheck {
+                expected: "abc123".to_string(),
+                computed: "abc123".to_string(),
+                matches: true,
+            }),
+            structural: StructuralResult {
+                ok: true,
+                error_count: 0,
+                warning_count: 1,
+                diagnostics: vec![Diagnostic {
+                    level: DiagnosticLevel::Warning,
+                    code: "W001".to_string(),
+                    message: "test warning".to_string(),
+                }],
+            },
+            exact_recomposition: Some(RecompositionStatus::Pass),
+            exit_code: 0,
+        };
+
+        let json = serde_json::to_string_pretty(&result).unwrap();
+        let deserialized: ValidationResult = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(result.plan_version, deserialized.plan_version);
+        assert_eq!(
+            result.plan_version_supported,
+            deserialized.plan_version_supported
+        );
+        assert_eq!(result.exit_code, deserialized.exit_code);
+        assert_eq!(result.structural.ok, deserialized.structural.ok);
+        assert_eq!(
+            result.structural.error_count,
+            deserialized.structural.error_count
+        );
+        assert_eq!(
+            result.structural.warning_count,
+            deserialized.structural.warning_count
+        );
+        assert_eq!(
+            result.structural.diagnostics.len(),
+            deserialized.structural.diagnostics.len()
+        );
+
+        // Fingerprint check round-trip
+        let fc = deserialized.fingerprint_check.unwrap();
+        assert_eq!(fc.expected, "abc123");
+        assert_eq!(fc.computed, "abc123");
+        assert!(fc.matches);
+    }
+
+    #[test]
+    fn validation_result_with_fail_recomposition_round_trip() {
+        let result = ValidationResult {
+            plan_version: "0.1.0".to_string(),
+            plan_version_supported: true,
+            fingerprint_check: None,
+            structural: StructuralResult {
+                ok: true,
+                error_count: 0,
+                warning_count: 0,
+                diagnostics: Vec::new(),
+            },
+            exact_recomposition: Some(RecompositionStatus::Fail {
+                message: "trees differ".to_string(),
+            }),
+            exit_code: 2,
+        };
+
+        let json = serde_json::to_string_pretty(&result).unwrap();
+        let deserialized: ValidationResult = serde_json::from_str(&json).unwrap();
+
+        match deserialized.exact_recomposition {
+            Some(RecompositionStatus::Fail { message }) => {
+                assert_eq!(message, "trees differ");
+            }
+            other => panic!("expected Fail variant, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn validation_result_skipped_recomposition_round_trip() {
+        let result = ValidationResult {
+            plan_version: "99.0.0".to_string(),
+            plan_version_supported: false,
+            fingerprint_check: None,
+            structural: StructuralResult {
+                ok: false,
+                error_count: 1,
+                warning_count: 0,
+                diagnostics: Vec::new(),
+            },
+            exact_recomposition: Some(RecompositionStatus::Skipped),
+            exit_code: 1,
+        };
+
+        let json = serde_json::to_string_pretty(&result).unwrap();
+        let deserialized: ValidationResult = serde_json::from_str(&json).unwrap();
+
+        assert!(!deserialized.plan_version_supported);
+        match deserialized.exact_recomposition {
+            Some(RecompositionStatus::Skipped) => {}
+            other => panic!("expected Skipped variant, got {:?}", other),
         }
     }
 }
