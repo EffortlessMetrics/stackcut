@@ -258,7 +258,6 @@ fn cmd_materialize(plan_path: &Path, out_dir: &Path, dry_run: bool) -> Result<i3
 // ── Doctor command ─────────────────────────────────────────────────────
 
 #[derive(Debug)]
-#[allow(dead_code)]
 struct DoctorCheck {
     name: String,
     status: DoctorStatus,
@@ -282,18 +281,24 @@ impl std::fmt::Display for DoctorStatus {
     }
 }
 
-fn check_git_repo(repo: &Path) -> DoctorCheck {
+fn check_git_repo(repo: &Path) -> (DoctorCheck, Option<PathBuf>) {
     match stackcut_git::discover_repo_root(repo) {
-        Ok(root) => DoctorCheck {
-            name: "git-repo".to_string(),
-            status: DoctorStatus::Ok,
-            message: format!("git repository found at {}", root.display()),
-        },
-        Err(_) => DoctorCheck {
-            name: "git-repo".to_string(),
-            status: DoctorStatus::Error,
-            message: "no git repository found".to_string(),
-        },
+        Ok(root) => {
+            let check = DoctorCheck {
+                name: "git-repo".to_string(),
+                status: DoctorStatus::Ok,
+                message: format!("git repository found at {}", root.display()),
+            };
+            (check, Some(root))
+        }
+        Err(_) => {
+            let check = DoctorCheck {
+                name: "git-repo".to_string(),
+                status: DoctorStatus::Error,
+                message: "no git repository found".to_string(),
+            };
+            (check, None)
+        }
     }
 }
 
@@ -314,75 +319,70 @@ fn check_config_file(repo_root: &Path) -> DoctorCheck {
     }
 }
 
-fn check_config_parse(repo_root: &Path) -> Option<DoctorCheck> {
+fn check_config_parse(repo_root: &Path) -> (Option<DoctorCheck>, Option<StackcutConfig>) {
     let config_path = repo_root.join("stackcut.toml");
     if !config_path.exists() {
-        return None;
+        return (None, None);
     }
     let contents = match fs::read_to_string(&config_path) {
         Ok(c) => c,
         Err(e) => {
-            return Some(DoctorCheck {
-                name: "config-parse".to_string(),
-                status: DoctorStatus::Error,
-                message: format!("failed to read stackcut.toml: {e}"),
-            });
+            return (
+                Some(DoctorCheck {
+                    name: "config-parse".to_string(),
+                    status: DoctorStatus::Error,
+                    message: format!("failed to read stackcut.toml: {e}"),
+                }),
+                None,
+            );
         }
     };
     match parse_config(&contents) {
-        Ok((_config, diagnostics)) => {
-            if diagnostics.is_empty() {
-                Some(DoctorCheck {
+        Ok((config, diagnostics)) => {
+            let check = if diagnostics.is_empty() {
+                DoctorCheck {
                     name: "config-parse".to_string(),
                     status: DoctorStatus::Ok,
                     message: "config parses cleanly".to_string(),
-                })
+                }
             } else {
                 let msgs: Vec<String> = diagnostics.iter().map(|d| d.message.clone()).collect();
-                Some(DoctorCheck {
+                DoctorCheck {
                     name: "config-parse".to_string(),
                     status: DoctorStatus::Warning,
                     message: format!("config parsed with warnings: {}", msgs.join("; ")),
-                })
-            }
+                }
+            };
+            (Some(check), Some(config))
         }
-        Err(e) => Some(DoctorCheck {
-            name: "config-parse".to_string(),
-            status: DoctorStatus::Error,
-            message: format!("config parse error: {e}"),
-        }),
+        Err(e) => (
+            Some(DoctorCheck {
+                name: "config-parse".to_string(),
+                status: DoctorStatus::Error,
+                message: format!("config parse error: {e}"),
+            }),
+            None,
+        ),
     }
 }
 
-fn check_path_families(repo_root: &Path) -> Option<DoctorCheck> {
-    let config_path = repo_root.join("stackcut.toml");
-    if !config_path.exists() {
-        return None;
-    }
-    let contents = match fs::read_to_string(&config_path) {
-        Ok(c) => c,
-        Err(_) => return None,
-    };
-    match parse_config(&contents) {
-        Ok((config, _)) => {
-            if config.path_families.is_empty() {
-                Some(DoctorCheck {
-                    name: "path-families".to_string(),
-                    status: DoctorStatus::Warning,
-                    message: "no path_families configured — family inference will use directory heuristics".to_string(),
-                })
-            } else {
-                Some(DoctorCheck {
-                    name: "path-families".to_string(),
-                    status: DoctorStatus::Ok,
-                    message: format!(
-                        "{} path_families rule(s) configured",
-                        config.path_families.len()
-                    ),
-                })
-            }
+fn check_path_families(config: &StackcutConfig) -> DoctorCheck {
+    if config.path_families.is_empty() {
+        DoctorCheck {
+            name: "path-families".to_string(),
+            status: DoctorStatus::Warning,
+            message: "no path_families configured — family inference will use directory heuristics"
+                .to_string(),
         }
-        Err(_) => None,
+    } else {
+        DoctorCheck {
+            name: "path-families".to_string(),
+            status: DoctorStatus::Ok,
+            message: format!(
+                "{} path_families rule(s) configured",
+                config.path_families.len()
+            ),
+        }
     }
 }
 
@@ -411,6 +411,13 @@ fn check_output_directory(repo_root: &Path) -> DoctorCheck {
             status: DoctorStatus::Ok,
             message: ".stackcut/ directory exists".to_string(),
         }
+    } else if dir.exists() {
+        DoctorCheck {
+            name: "output-dir".to_string(),
+            status: DoctorStatus::Error,
+            message: ".stackcut exists but is not a directory — this will block normal operation"
+                .to_string(),
+        }
     } else {
         DoctorCheck {
             name: "output-dir".to_string(),
@@ -420,22 +427,31 @@ fn check_output_directory(repo_root: &Path) -> DoctorCheck {
     }
 }
 
-fn check_manifest_coverage(repo_root: &Path) -> DoctorCheck {
-    let config_path = repo_root.join("stackcut.toml");
-    let config = if config_path.exists() {
-        fs::read_to_string(&config_path)
-            .ok()
-            .and_then(|c| parse_config(&c).ok())
-            .map(|(cfg, _)| cfg)
-            .unwrap_or_default()
-    } else {
-        StackcutConfig::default()
-    };
-
+fn check_manifest_coverage(repo_root: &Path, config: &StackcutConfig) -> DoctorCheck {
+    // Match by exact path OR by filename, consistent with classify_path in
+    // stackcut-core which checks `entry == file_name || entry == path`.
     let found: Vec<String> = config
         .manifest_files
         .iter()
-        .filter(|f| repo_root.join(f).exists())
+        .filter(|entry| {
+            // Direct path match (e.g. "Cargo.toml" at repo root)
+            if repo_root.join(entry).exists() {
+                return true;
+            }
+            // Filename match: scan repo root entries for a matching name.
+            // The planner matches any file whose basename equals the entry,
+            // so we check immediate children of the repo root.
+            if let Ok(entries) = fs::read_dir(repo_root) {
+                for dir_entry in entries.flatten() {
+                    if let Some(name) = dir_entry.file_name().to_str() {
+                        if name == entry.as_str() {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        })
         .cloned()
         .collect();
 
@@ -478,30 +494,29 @@ fn check_codeowners(repo_root: &Path) -> DoctorCheck {
 fn run_doctor_checks(repo: &Path) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
 
-    // 1. Git repo check
-    let git_check = check_git_repo(repo);
-    let git_ok = git_check.status != DoctorStatus::Error;
+    // 1. Git repo check — also returns the discovered root (comment A fix)
+    let (git_check, repo_root) = check_git_repo(repo);
     checks.push(git_check);
 
-    if !git_ok {
-        return checks;
-    }
-
-    // We know discover_repo_root succeeds if git_ok is true
-    let repo_root = stackcut_git::discover_repo_root(repo).unwrap();
+    let repo_root = match repo_root {
+        Some(root) => root,
+        None => return checks,
+    };
 
     // 2. Config file
     checks.push(check_config_file(&repo_root));
 
-    // 3. Config parse (only if config exists)
-    if let Some(check) = check_config_parse(&repo_root) {
+    // 3. Config parse — also returns the parsed config for reuse (comment B fix)
+    let (parse_check, parsed_config) = check_config_parse(&repo_root);
+    if let Some(check) = parse_check {
         checks.push(check);
     }
 
-    // 4. Path families (only if config exists and parses)
-    if let Some(check) = check_path_families(&repo_root) {
-        checks.push(check);
-    }
+    // Use parsed config if available, otherwise fall back to defaults
+    let config = parsed_config.unwrap_or_default();
+
+    // 4. Path families (uses shared parsed config)
+    checks.push(check_path_families(&config));
 
     // 5. Override file
     checks.push(check_override_file(&repo_root));
@@ -509,8 +524,8 @@ fn run_doctor_checks(repo: &Path) -> Vec<DoctorCheck> {
     // 6. Output directory
     checks.push(check_output_directory(&repo_root));
 
-    // 7. Manifest coverage
-    checks.push(check_manifest_coverage(&repo_root));
+    // 7. Manifest coverage (uses shared parsed config)
+    checks.push(check_manifest_coverage(&repo_root, &config));
 
     // 8. CODEOWNERS
     checks.push(check_codeowners(&repo_root));
@@ -533,7 +548,7 @@ fn cmd_doctor(repo: &Path) -> Result<i32> {
             DoctorStatus::Warning => warn_count += 1,
             DoctorStatus::Error => error_count += 1,
         }
-        println!("[{}] {}", check.status, check.message);
+        println!("[{}] {}: {}", check.status, check.name, check.message);
     }
 
     println!(
@@ -577,8 +592,8 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use stackcut_core::{
-        ChangeStatus, EditUnit, InclusionReason, Plan, PlanSource, ProofSurface, Slice, SliceKind,
-        UnitKind, PLAN_VERSION,
+        ChangeStatus, EditUnit, InclusionReason, PathFamilyRule, Plan, PlanSource, ProofSurface,
+        Slice, SliceKind, UnitKind, PLAN_VERSION,
     };
 
     /// Build a minimal valid Plan with the given version string.
@@ -765,17 +780,21 @@ mod tests {
     fn doctor_check_config_parse_valid() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("stackcut.toml"), "version = 1\n").unwrap();
-        let check = check_config_parse(dir.path()).unwrap();
+        let (check, config) = check_config_parse(dir.path());
+        let check = check.unwrap();
         assert_eq!(check.status, DoctorStatus::Ok);
         assert!(check.message.contains("parses cleanly"));
+        assert!(config.is_some(), "parsed config should be returned");
     }
 
     #[test]
     fn doctor_check_config_parse_invalid() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("stackcut.toml"), "{{bad toml").unwrap();
-        let check = check_config_parse(dir.path()).unwrap();
+        let (check, config) = check_config_parse(dir.path());
+        let check = check.unwrap();
         assert_eq!(check.status, DoctorStatus::Error);
+        assert!(config.is_none(), "no config on parse failure");
     }
 
     #[test]
@@ -786,46 +805,45 @@ mod tests {
             "version = 1\nfoo_unknown = true\n",
         )
         .unwrap();
-        let check = check_config_parse(dir.path()).unwrap();
+        let (check, config) = check_config_parse(dir.path());
+        let check = check.unwrap();
         assert_eq!(check.status, DoctorStatus::Warning);
         assert!(check.message.contains("warnings"));
+        assert!(config.is_some(), "config returned even with warnings");
     }
 
     #[test]
     fn doctor_check_config_parse_absent() {
         let dir = tempfile::tempdir().unwrap();
-        let check = check_config_parse(dir.path());
+        let (check, config) = check_config_parse(dir.path());
         assert!(check.is_none());
+        assert!(config.is_none());
     }
 
     #[test]
     fn doctor_check_path_families_empty() {
-        let dir = tempfile::tempdir().unwrap();
         // Config with empty path_families
-        fs::write(dir.path().join("stackcut.toml"), "version = 1\n").unwrap();
-        let check = check_path_families(dir.path()).unwrap();
+        let config = StackcutConfig {
+            path_families: vec![],
+            ..StackcutConfig::default()
+        };
+        let check = check_path_families(&config);
         assert_eq!(check.status, DoctorStatus::Warning);
         assert!(check.message.contains("no path_families"));
     }
 
     #[test]
     fn doctor_check_path_families_present() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(
-            dir.path().join("stackcut.toml"),
-            "version = 1\n\n[[path_families]]\nprefix = \"src/\"\nfamily = \"core\"\n",
-        )
-        .unwrap();
-        let check = check_path_families(dir.path()).unwrap();
+        let config = StackcutConfig {
+            path_families: vec![PathFamilyRule {
+                prefix: "src/".to_string(),
+                family: "core".to_string(),
+            }],
+            ..StackcutConfig::default()
+        };
+        let check = check_path_families(&config);
         assert_eq!(check.status, DoctorStatus::Ok);
         assert!(check.message.contains("1 path_families rule(s)"));
-    }
-
-    #[test]
-    fn doctor_check_path_families_no_config() {
-        let dir = tempfile::tempdir().unwrap();
-        let check = check_path_families(dir.path());
-        assert!(check.is_none());
     }
 
     #[test]
@@ -864,11 +882,21 @@ mod tests {
     }
 
     #[test]
+    fn doctor_check_output_directory_is_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".stackcut"), "not a directory").unwrap();
+        let check = check_output_directory(dir.path());
+        assert_eq!(check.status, DoctorStatus::Error);
+        assert!(check.message.contains("not a directory"));
+    }
+
+    #[test]
     fn doctor_check_manifest_coverage_found() {
         let dir = tempfile::tempdir().unwrap();
+        let config = StackcutConfig::default();
         // Use default config which includes Cargo.toml
         fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
-        let check = check_manifest_coverage(dir.path());
+        let check = check_manifest_coverage(dir.path(), &config);
         assert_eq!(check.status, DoctorStatus::Ok);
         assert!(check.message.contains("Cargo.toml"));
     }
@@ -876,9 +904,25 @@ mod tests {
     #[test]
     fn doctor_check_manifest_coverage_none() {
         let dir = tempfile::tempdir().unwrap();
-        let check = check_manifest_coverage(dir.path());
+        let config = StackcutConfig::default();
+        let check = check_manifest_coverage(dir.path(), &config);
         assert_eq!(check.status, DoctorStatus::Warning);
         assert!(check.message.contains("no configured manifest files found"));
+    }
+
+    #[test]
+    fn doctor_check_manifest_coverage_matches_by_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        // The file is at the root level with a matching basename
+        let config = StackcutConfig {
+            manifest_files: vec!["Cargo.toml".to_string()],
+            ..StackcutConfig::default()
+        };
+        // Place the file at the repo root (filename match)
+        fs::write(dir.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+        let check = check_manifest_coverage(dir.path(), &config);
+        assert_eq!(check.status, DoctorStatus::Ok);
+        assert!(check.message.contains("Cargo.toml"));
     }
 
     #[test]
@@ -921,9 +965,10 @@ mod tests {
     #[test]
     fn doctor_check_git_repo_not_found() {
         let dir = tempfile::tempdir().unwrap();
-        let check = check_git_repo(dir.path());
+        let (check, root) = check_git_repo(dir.path());
         assert_eq!(check.status, DoctorStatus::Error);
         assert!(check.message.contains("no git repository found"));
+        assert!(root.is_none());
     }
 
     // Feature: stackcut-v01-completion, Property 22: Unsupported Plan Version Rejection
