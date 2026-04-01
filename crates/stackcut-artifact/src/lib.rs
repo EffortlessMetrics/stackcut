@@ -51,6 +51,130 @@ pub fn write_plan(path: &Path, plan: &Plan) -> Result<()> {
     Ok(())
 }
 
+/// Escape a string for use as a TOML quoted value.
+/// Handles `\` → `\\` and `"` → `\"`.
+fn escape_toml_value(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+pub fn scaffold_overrides(plan: &Plan) -> String {
+    let mut out = String::new();
+
+    // Header
+    out.push_str("# stackcut override file\n");
+    out.push_str("# Generated from plan. Edit to customize slice membership and ordering.\n");
+    out.push_str("# See examples/override.toml for reference.\n");
+    out.push_str("version = 1\n");
+
+    // === Ambiguity resolutions ===
+    if !plan.ambiguities.is_empty() {
+        out.push_str("\n# === Ambiguity resolutions ===\n");
+        out.push_str("# The following ambiguities were detected. Uncomment and edit to resolve.\n");
+
+        for ambiguity in &plan.ambiguities {
+            out.push_str(&format!("\n# Ambiguity: {}\n", ambiguity.message));
+            if !ambiguity.candidate_slices.is_empty() {
+                out.push_str(&format!(
+                    "# Candidates: {}\n",
+                    ambiguity.candidate_slices.join(", ")
+                ));
+            }
+
+            let target_slice = ambiguity
+                .candidate_slices
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "UNKNOWN".to_string());
+            let alternatives: Vec<&str> = ambiguity
+                .candidate_slices
+                .iter()
+                .skip(1)
+                .map(|s| s.as_str())
+                .collect();
+
+            for unit in &ambiguity.affected_units {
+                out.push_str("# [[force_members]]\n");
+                out.push_str(&format!("# member = \"{}\"\n", escape_toml_value(unit)));
+                if alternatives.is_empty() {
+                    out.push_str(&format!(
+                        "# slice = \"{}\"\n",
+                        escape_toml_value(&target_slice)
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "# slice = \"{}\"  # or: {}\n",
+                        escape_toml_value(&target_slice),
+                        alternatives.join(", ")
+                    ));
+                }
+                out.push_str(&format!(
+                    "# reason = \"Resolve ambiguity: attach {} to preferred slice\"\n",
+                    escape_toml_value(unit)
+                ));
+            }
+
+            // If 2+ affected units, generate a must_link entry
+            if ambiguity.affected_units.len() >= 2 {
+                out.push_str("# [[must_link]]\n");
+                out.push_str(&format!(
+                    "# members = [{}]\n",
+                    ambiguity
+                        .affected_units
+                        .iter()
+                        .map(|u| format!("\"{}\"", escape_toml_value(u)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                out.push_str("# reason = \"Keep ambiguous units together\"\n");
+            }
+        }
+    }
+
+    // === Slice renames ===
+    if !plan.slices.is_empty() {
+        out.push_str("\n# === Slice renames ===\n");
+        out.push_str("# Uncomment to give slices more descriptive titles.\n");
+        for slice in &plan.slices {
+            out.push_str("# [[rename_slices]]\n");
+            out.push_str(&format!("# id = \"{}\"\n", escape_toml_value(&slice.id)));
+            out.push_str(&format!(
+                "# title = \"{}\"\n",
+                escape_toml_value(&slice.title)
+            ));
+        }
+    }
+
+    // === Ordering constraints ===
+    // Find pairs where one slice depends on another
+    let ordering_pairs: Vec<(&str, &str)> = plan
+        .slices
+        .iter()
+        .flat_map(|slice| {
+            slice
+                .depends_on
+                .iter()
+                .map(move |dep| (dep.as_str(), slice.id.as_str()))
+        })
+        .collect();
+
+    if !ordering_pairs.is_empty() {
+        out.push_str("\n# === Ordering constraints ===\n");
+        out.push_str("# Uncomment to enforce review order between slices.\n");
+        for (before, after) in &ordering_pairs {
+            out.push_str("# [[must_order]]\n");
+            out.push_str(&format!("# before = \"{}\"\n", escape_toml_value(before)));
+            out.push_str(&format!("# after = \"{}\"\n", escape_toml_value(after)));
+            out.push_str(&format!(
+                "# reason = \"{} should land before {}\"\n",
+                escape_toml_value(before),
+                escape_toml_value(after)
+            ));
+        }
+    }
+
+    out
+}
+
 pub fn write_diagnostics(path: &Path, diagnostics: &[Diagnostic]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -437,9 +561,9 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use stackcut_core::{
-        ChangeStatus, Diagnostic, DiagnosticLevel, EditUnit, ForceMemberOverride, InclusionReason,
-        MustLinkOverride, MustOrderOverride, Overrides, PathFamilyRule, Plan, PlanSource,
-        ProofSurface, RenameSliceOverride, Slice, SliceKind, StackcutConfig, UnitKind,
+        Ambiguity, ChangeStatus, Diagnostic, DiagnosticLevel, EditUnit, ForceMemberOverride,
+        InclusionReason, MustLinkOverride, MustOrderOverride, Overrides, PathFamilyRule, Plan,
+        PlanSource, ProofSurface, RenameSliceOverride, Slice, SliceKind, StackcutConfig, UnitKind,
     };
 
     #[test]
@@ -1301,5 +1425,180 @@ mod tests {
         assert!(rendered.contains("## slices removed"));
         assert!(rendered.contains("## slices modified"));
         assert!(rendered.contains("## units moved"));
+    }
+
+    // ── scaffold_overrides tests ───────────────────────────────────────
+
+    fn minimal_plan_for_scaffold() -> Plan {
+        Plan {
+            version: "0.1.0".to_string(),
+            source: PlanSource {
+                repo_root: None,
+                base: "aaa".to_string(),
+                head: "bbb".to_string(),
+                head_tree: None,
+            },
+            units: vec![EditUnit {
+                id: "path:src/main.rs".to_string(),
+                path: "src/main.rs".to_string(),
+                old_path: None,
+                status: ChangeStatus::Modified,
+                kind: UnitKind::Behavior,
+                family: "cli".to_string(),
+                notes: Vec::new(),
+            }],
+            slices: vec![Slice {
+                id: "behavior-cli".to_string(),
+                title: "Behavior: cli".to_string(),
+                kind: SliceKind::Behavior,
+                families: vec!["cli".to_string()],
+                members: vec!["path:src/main.rs".to_string()],
+                depends_on: Vec::new(),
+                reasons: Vec::new(),
+                proof_surface: ProofSurface::default(),
+            }],
+            ambiguities: Vec::new(),
+            diagnostics: Vec::new(),
+            fingerprint: None,
+        }
+    }
+
+    #[test]
+    fn scaffold_no_ambiguities_produces_minimal_toml() {
+        let plan = minimal_plan_for_scaffold();
+        let output = scaffold_overrides(&plan);
+
+        // Must start with version = 1
+        assert!(
+            output.contains("version = 1"),
+            "scaffold output missing version = 1"
+        );
+
+        // With no ambiguities, no force_members section
+        assert!(
+            !output.contains("Ambiguity resolutions"),
+            "scaffold should not have ambiguity section when there are none"
+        );
+
+        // The uncommented lines should form valid TOML (just the version line)
+        let uncommented: String = output
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed: toml::Value =
+            toml::from_str(&uncommented).expect("uncommented scaffold output should be valid TOML");
+        assert_eq!(parsed.get("version").and_then(|v| v.as_integer()), Some(1));
+    }
+
+    #[test]
+    fn scaffold_with_ambiguities_includes_force_members() {
+        let mut plan = minimal_plan_for_scaffold();
+
+        // Add a second slice so ambiguity candidates make sense
+        plan.slices.push(Slice {
+            id: "behavior-git".to_string(),
+            title: "Behavior: git".to_string(),
+            kind: SliceKind::Behavior,
+            families: vec!["git".to_string()],
+            members: vec!["path:src/git.rs".to_string()],
+            depends_on: Vec::new(),
+            reasons: Vec::new(),
+            proof_surface: ProofSurface::default(),
+        });
+
+        plan.ambiguities.push(Ambiguity {
+            id: "ambig-readme".to_string(),
+            message: "README.md changed with multiple behavior families".to_string(),
+            affected_units: vec![
+                "path:README.md".to_string(),
+                "path:CHANGELOG.md".to_string(),
+            ],
+            candidate_slices: vec!["behavior-cli".to_string(), "behavior-git".to_string()],
+            resolution: "Assign to one slice via force_members".to_string(),
+        });
+
+        let output = scaffold_overrides(&plan);
+
+        // Must start with version = 1
+        assert!(
+            output.contains("version = 1"),
+            "scaffold output missing version = 1"
+        );
+
+        // Must mention the ambiguity
+        assert!(
+            output.contains("README.md changed with multiple behavior families"),
+            "scaffold output missing ambiguity message"
+        );
+
+        // Must include force_members for each affected unit
+        assert!(
+            output.contains("path:README.md"),
+            "scaffold output missing affected unit README.md"
+        );
+        assert!(
+            output.contains("path:CHANGELOG.md"),
+            "scaffold output missing affected unit CHANGELOG.md"
+        );
+
+        // Must list candidate slices
+        assert!(
+            output.contains("behavior-cli"),
+            "scaffold output missing candidate slice behavior-cli"
+        );
+        assert!(
+            output.contains("behavior-git"),
+            "scaffold output missing candidate slice behavior-git"
+        );
+
+        // With 2+ affected units, should include must_link
+        assert!(
+            output.contains("must_link"),
+            "scaffold output missing must_link for multi-unit ambiguity"
+        );
+    }
+
+    #[test]
+    fn escape_toml_value_handles_special_chars() {
+        assert_eq!(escape_toml_value("plain"), "plain");
+        assert_eq!(escape_toml_value(r#"has"quote"#), r#"has\"quote"#);
+        assert_eq!(escape_toml_value(r"has\backslash"), r"has\\backslash");
+        assert_eq!(escape_toml_value(r#"both\"chars"#), r#"both\\\"chars"#);
+    }
+
+    #[test]
+    fn scaffold_escapes_special_chars_in_ids() {
+        let mut plan = minimal_plan_for_scaffold();
+        plan.slices[0].id = r#"slice-with"quote"#.to_string();
+        plan.slices[0].title = r#"Title with "quotes" and \backslash"#.to_string();
+
+        let output = scaffold_overrides(&plan);
+
+        assert!(
+            output.contains(r#"# id = "slice-with\"quote""#),
+            "scaffold output should escape quotes in slice id: {}",
+            output
+        );
+        assert!(
+            output.contains(r#"# title = "Title with \"quotes\" and \\backslash""#),
+            "scaffold output should escape quotes and backslashes in title: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn scaffold_output_always_starts_with_version() {
+        // Plan with no ambiguities
+        let plan = minimal_plan_for_scaffold();
+        let output = scaffold_overrides(&plan);
+        let first_non_comment = output
+            .lines()
+            .find(|l| !l.starts_with('#') && !l.is_empty())
+            .expect("output should have non-comment lines");
+        assert_eq!(
+            first_non_comment, "version = 1",
+            "first non-comment line should be version = 1"
+        );
     }
 }

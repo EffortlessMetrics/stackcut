@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use serde::de::DeserializeOwned;
 use stackcut_artifact::{
     compare_plans, compute_fingerprint, read_plan, render_comparison, render_summary,
-    write_diagnostics_envelope, write_plan, write_summary,
+    scaffold_overrides, write_diagnostics_envelope, write_plan, write_summary,
 };
 use stackcut_core::{
     parse_config, plan as build_plan, structural_validate, DiagnosticLevel, Overrides,
@@ -81,6 +81,17 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Generate an override.toml scaffold from a plan's ambiguities.
+    ScaffoldOverrides {
+        /// Path to the plan.json to scaffold from.
+        plan: PathBuf,
+        /// Output path for the generated override.toml.
+        #[arg(long, default_value = ".stackcut/override.toml")]
+        output: PathBuf,
+        /// Overwrite existing file without prompting.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn main() {
@@ -121,6 +132,11 @@ fn run() -> Result<i32> {
             dry_run,
         } => cmd_materialize(&plan, &out_dir, dry_run),
         Commands::Compare { old, new, json } => cmd_compare(&old, &new, json),
+        Commands::ScaffoldOverrides {
+            plan,
+            output,
+            force,
+        } => cmd_scaffold_overrides(&plan, &output, force),
     }
 }
 
@@ -273,6 +289,29 @@ fn cmd_compare(old_path: &Path, new_path: &Path, json: bool) -> Result<i32> {
     Ok(ExitCode::Success as i32)
 }
 
+fn cmd_scaffold_overrides(plan_path: &Path, output: &Path, force: bool) -> Result<i32> {
+    let plan = read_plan(plan_path)?;
+    let toml_text = scaffold_overrides(&plan);
+
+    if output.exists() && !force {
+        eprintln!(
+            "error: {} already exists (use --force to overwrite)",
+            output.display()
+        );
+        return Ok(ExitCode::StructuralError as i32);
+    }
+
+    if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(output, &toml_text)
+        .with_context(|| format!("failed to write {}", output.display()))?;
+
+    println!("wrote {}", output.display());
+    Ok(ExitCode::Success as i32)
+}
+
 fn load_toml_or_default<T>(path: Option<&Path>) -> Result<T>
 where
     T: DeserializeOwned + Default,
@@ -379,6 +418,10 @@ mod tests {
             subcommand_names.contains(&"materialize"),
             "CLI missing 'materialize' subcommand"
         );
+        assert!(
+            subcommand_names.contains(&"scaffold-overrides"),
+            "CLI missing 'scaffold-overrides' subcommand"
+        );
     }
 
     #[test]
@@ -404,6 +447,10 @@ mod tests {
         assert!(
             help.contains("materialize"),
             "Root help missing 'materialize' subcommand"
+        );
+        assert!(
+            help.contains("scaffold-overrides"),
+            "Root help missing 'scaffold-overrides' subcommand"
         );
 
         // Stability: generating help twice produces identical output
@@ -450,6 +497,16 @@ mod tests {
                     assert!(
                         help.contains("--out-dir"),
                         "materialize help missing --out-dir"
+                    );
+                }
+                "scaffold-overrides" => {
+                    assert!(
+                        help.contains("--output"),
+                        "scaffold-overrides help missing --output"
+                    );
+                    assert!(
+                        help.contains("--force"),
+                        "scaffold-overrides help missing --force"
                     );
                 }
                 _ => {} // help subcommand auto-added by clap
@@ -538,5 +595,71 @@ mod tests {
 
         let result = cmd_compare(&old_path, &new_path, true).unwrap();
         assert_eq!(result, ExitCode::Success as i32);
+    }
+
+    // ── scaffold-overrides tests ───────────────────────────────────────
+
+    #[test]
+    fn scaffold_overrides_writes_file_and_returns_success() {
+        let plan = minimal_plan(PLAN_VERSION);
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.json");
+        let json = serde_json::to_string_pretty(&plan).unwrap();
+        std::fs::write(&plan_path, format!("{json}\n")).unwrap();
+
+        let output = dir.path().join("override.toml");
+        let result = cmd_scaffold_overrides(&plan_path, &output, false).unwrap();
+        assert_eq!(result, ExitCode::Success as i32);
+        assert!(output.exists(), "override.toml should be created");
+
+        let contents = std::fs::read_to_string(&output).unwrap();
+        assert!(
+            contents.contains("version = 1"),
+            "output should contain version = 1"
+        );
+    }
+
+    #[test]
+    fn scaffold_overrides_refuses_overwrite_without_force() {
+        let plan = minimal_plan(PLAN_VERSION);
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.json");
+        let json = serde_json::to_string_pretty(&plan).unwrap();
+        std::fs::write(&plan_path, format!("{json}\n")).unwrap();
+
+        let output = dir.path().join("override.toml");
+        std::fs::write(&output, "existing content").unwrap();
+
+        let result = cmd_scaffold_overrides(&plan_path, &output, false).unwrap();
+        assert_eq!(
+            result,
+            ExitCode::StructuralError as i32,
+            "should refuse to overwrite without --force"
+        );
+
+        // Original content should be preserved
+        let contents = std::fs::read_to_string(&output).unwrap();
+        assert_eq!(contents, "existing content");
+    }
+
+    #[test]
+    fn scaffold_overrides_overwrites_with_force() {
+        let plan = minimal_plan(PLAN_VERSION);
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.json");
+        let json = serde_json::to_string_pretty(&plan).unwrap();
+        std::fs::write(&plan_path, format!("{json}\n")).unwrap();
+
+        let output = dir.path().join("override.toml");
+        std::fs::write(&output, "existing content").unwrap();
+
+        let result = cmd_scaffold_overrides(&plan_path, &output, true).unwrap();
+        assert_eq!(result, ExitCode::Success as i32);
+
+        let contents = std::fs::read_to_string(&output).unwrap();
+        assert!(
+            contents.contains("version = 1"),
+            "overwritten file should contain scaffold output"
+        );
     }
 }
