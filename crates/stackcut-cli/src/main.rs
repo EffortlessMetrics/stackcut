@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde::de::DeserializeOwned;
 use stackcut_artifact::{
-    compare_plans, compute_fingerprint, read_plan, render_comparison, render_summary,
+    compare_plans, compute_fingerprint, read_plan, render_comparison, render_sarif, render_summary,
     scaffold_overrides, write_diagnostics_envelope, write_plan, write_receipt, write_summary,
     FingerprintCheck, RecompositionReceipt, RecompositionStatus, RecompositionVerdict, SliceHash,
     StructuralResult, ValidationResult,
@@ -123,6 +123,14 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// Emit diagnostics in SARIF format for CI integration.
+    EmitSarif {
+        /// Path to the plan.json.
+        plan: PathBuf,
+        /// Write to file instead of stdout.
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -177,6 +185,7 @@ fn run() -> Result<i32> {
             output,
             force,
         } => cmd_scaffold_overrides(&plan, &output, force),
+        Commands::EmitSarif { plan, output } => cmd_emit_sarif(&plan, output.as_deref()),
     }
 }
 
@@ -1051,6 +1060,28 @@ fn cmd_scaffold_overrides(plan_path: &Path, output: &Path, force: bool) -> Resul
     Ok(ExitCode::Success as i32)
 }
 
+fn cmd_emit_sarif(plan_path: &Path, output: Option<&Path>) -> Result<i32> {
+    let plan = read_plan(plan_path)?;
+    let sarif = render_sarif(&plan);
+    let json = serde_json::to_string_pretty(&sarif).context("failed to serialize SARIF")?;
+
+    match output {
+        Some(path) => {
+            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            fs::write(path, format!("{json}\n"))
+                .with_context(|| format!("failed to write {}", path.display()))?;
+            println!("wrote {}", path.display());
+        }
+        None => {
+            println!("{json}");
+        }
+    }
+    Ok(ExitCode::Success as i32)
+}
+
 fn load_toml_or_default<T>(path: Option<&Path>) -> Result<T>
 where
     T: DeserializeOwned + Default,
@@ -1166,6 +1197,10 @@ mod tests {
         assert!(
             subcommand_names.contains(&"scaffold-overrides"),
             "CLI missing 'scaffold-overrides' subcommand"
+        );
+        assert!(
+            subcommand_names.contains(&"emit-sarif"),
+            "CLI missing 'emit-sarif' subcommand"
         );
     }
 
