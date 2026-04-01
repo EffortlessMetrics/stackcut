@@ -1025,6 +1025,7 @@ mod tests {
                     message: "test".to_string(),
                 }],
                 proof_surface: ProofSurface::default(),
+                fingerprint: None,
             }],
             ambiguities: Vec::new(),
             diagnostics: Vec::new(),

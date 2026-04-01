@@ -85,7 +85,10 @@ pub fn write_plan(path: &Path, plan: &Plan) -> Result<()> {
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let mut plan_with_fp = plan.clone();
-    plan_with_fp.fingerprint = Some(compute_fingerprint(plan));
+    for slice in &mut plan_with_fp.slices {
+        slice.fingerprint = Some(slice.compute_fingerprint());
+    }
+    plan_with_fp.fingerprint = Some(compute_fingerprint(&plan_with_fp));
     let json = serde_json::to_string_pretty(&plan_with_fp).context("failed to serialize plan")?;
     fs::write(path, format!("{json}\n"))
         .with_context(|| format!("failed to write {}", path.display()))?;
@@ -635,6 +638,7 @@ mod tests {
                 depends_on: Vec::new(),
                 reasons: Vec::new(),
                 proof_surface: ProofSurface::default(),
+                fingerprint: None,
             }],
             ambiguities: Vec::new(),
             diagnostics: vec![Diagnostic {
@@ -727,6 +731,7 @@ mod tests {
                     message: "test reason".to_string(),
                 }],
                 proof_surface: ProofSurface::default(),
+                fingerprint: None,
             }
         })
     }
@@ -1244,6 +1249,7 @@ mod tests {
             depends_on: Vec::new(),
             reasons: Vec::new(),
             proof_surface: ProofSurface::default(),
+            fingerprint: None,
         }
     }
 
@@ -1500,6 +1506,7 @@ mod tests {
                 depends_on: Vec::new(),
                 reasons: Vec::new(),
                 proof_surface: ProofSurface::default(),
+                fingerprint: None,
             }],
             ambiguities: Vec::new(),
             diagnostics: Vec::new(),
@@ -1550,6 +1557,7 @@ mod tests {
             depends_on: Vec::new(),
             reasons: Vec::new(),
             proof_surface: ProofSurface::default(),
+            fingerprint: None,
         });
 
         plan.ambiguities.push(Ambiguity {
@@ -1800,5 +1808,70 @@ mod tests {
             json.contains("\"fail\""),
             "fail verdict should serialize as kebab-case"
         );
+    }
+
+    // ── Slice fingerprint tests ────────────────────────────────────────
+
+    #[test]
+    fn write_plan_populates_slice_fingerprints() {
+        let plan = Plan {
+            version: "0.1.0".to_string(),
+            source: PlanSource {
+                repo_root: None,
+                base: "base".to_string(),
+                head: "head".to_string(),
+                head_tree: None,
+            },
+            units: vec![EditUnit {
+                id: "path:src/core/planner.rs".to_string(),
+                path: "src/core/planner.rs".to_string(),
+                old_path: None,
+                status: ChangeStatus::Modified,
+                kind: stackcut_core::UnitKind::Behavior,
+                family: "core".to_string(),
+                notes: Vec::new(),
+            }],
+            slices: vec![Slice {
+                id: "behavior-core".to_string(),
+                title: "Behavior: core".to_string(),
+                kind: SliceKind::Behavior,
+                families: vec!["core".to_string()],
+                members: vec!["path:src/core/planner.rs".to_string()],
+                depends_on: Vec::new(),
+                reasons: Vec::new(),
+                proof_surface: ProofSurface::default(),
+                fingerprint: None,
+            }],
+            ambiguities: Vec::new(),
+            diagnostics: Vec::new(),
+            fingerprint: None,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plan.json");
+        write_plan(&path, &plan).unwrap();
+
+        let written_plan = read_plan(&path).unwrap();
+
+        // Every slice must have a fingerprint
+        for slice in &written_plan.slices {
+            assert!(
+                slice.fingerprint.is_some(),
+                "slice '{}' should have a fingerprint after write_plan",
+                slice.id
+            );
+        }
+
+        // The fingerprint should match what compute_fingerprint returns
+        // (computed on the original slice before fingerprint is set)
+        for (original, written) in plan.slices.iter().zip(written_plan.slices.iter()) {
+            let expected_fp = original.compute_fingerprint();
+            assert_eq!(
+                written.fingerprint.as_deref(),
+                Some(expected_fp.as_str()),
+                "slice '{}' fingerprint mismatch",
+                original.id
+            );
+        }
     }
 }

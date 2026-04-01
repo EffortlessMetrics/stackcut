@@ -92,6 +92,30 @@ pub struct Slice {
     pub reasons: Vec<InclusionReason>,
     #[serde(default)]
     pub proof_surface: ProofSurface,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+}
+
+impl Slice {
+    pub fn compute_fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
+        // Canonical: sorted members, kind, families, depends_on
+        let mut hasher = Sha256::new();
+        hasher.update(self.id.as_bytes());
+        hasher.update(b"|");
+        hasher.update(format!("{:?}", self.kind).as_bytes());
+        hasher.update(b"|");
+        for member in &self.members {
+            hasher.update(member.as_bytes());
+            hasher.update(b",");
+        }
+        hasher.update(b"|");
+        for dep in &self.depends_on {
+            hasher.update(dep.as_bytes());
+            hasher.update(b",");
+        }
+        format!("{:x}", hasher.finalize())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -1112,6 +1136,7 @@ fn new_slice(
             scenario_ids: Vec::new(),
             expected_commands: vec!["cargo test --workspace".to_string()],
         },
+        fingerprint: None,
     };
     dedup_and_sort(&mut slice.families);
     dedup_and_sort(&mut slice.members);
@@ -4179,5 +4204,122 @@ another_bad_key = 42
                     "[{}] Ambiguity '{}' candidate_slices mismatch", case_name, actual.id);
             }
         }
+    }
+
+    // ── Slice fingerprint tests ──────────────────────────────────────────
+
+    #[test]
+    fn slice_fingerprint_is_deterministic() {
+        let slice = Slice {
+            id: "behavior-core".to_string(),
+            title: "Behavior: core".to_string(),
+            kind: SliceKind::Behavior,
+            families: vec!["core".to_string()],
+            members: vec!["path:src/core/planner.rs".to_string()],
+            depends_on: Vec::new(),
+            reasons: Vec::new(),
+            proof_surface: ProofSurface::default(),
+            fingerprint: None,
+        };
+        let fp1 = slice.compute_fingerprint();
+        let fp2 = slice.compute_fingerprint();
+        assert_eq!(fp1, fp2, "fingerprint must be deterministic");
+        assert!(!fp1.is_empty(), "fingerprint must not be empty");
+    }
+
+    #[test]
+    fn slice_fingerprint_changes_when_members_change() {
+        let slice_a = Slice {
+            id: "behavior-core".to_string(),
+            title: "Behavior: core".to_string(),
+            kind: SliceKind::Behavior,
+            families: vec!["core".to_string()],
+            members: vec!["path:src/core/planner.rs".to_string()],
+            depends_on: Vec::new(),
+            reasons: Vec::new(),
+            proof_surface: ProofSurface::default(),
+            fingerprint: None,
+        };
+        let mut slice_b = slice_a.clone();
+        slice_b.members = vec![
+            "path:src/core/planner.rs".to_string(),
+            "path:src/core/extra.rs".to_string(),
+        ];
+        assert_ne!(
+            slice_a.compute_fingerprint(),
+            slice_b.compute_fingerprint(),
+            "changing members must change fingerprint"
+        );
+    }
+
+    #[test]
+    fn slice_fingerprint_changes_when_kind_changes() {
+        let slice_a = Slice {
+            id: "behavior-core".to_string(),
+            title: "Behavior: core".to_string(),
+            kind: SliceKind::Behavior,
+            families: vec!["core".to_string()],
+            members: vec!["path:src/core/planner.rs".to_string()],
+            depends_on: Vec::new(),
+            reasons: Vec::new(),
+            proof_surface: ProofSurface::default(),
+            fingerprint: None,
+        };
+        let mut slice_b = slice_a.clone();
+        slice_b.kind = SliceKind::Mechanical;
+        assert_ne!(
+            slice_a.compute_fingerprint(),
+            slice_b.compute_fingerprint(),
+            "changing kind must change fingerprint"
+        );
+    }
+
+    #[test]
+    fn slice_fingerprint_serde_none_omitted() {
+        let slice = Slice {
+            id: "test".to_string(),
+            title: "Test".to_string(),
+            kind: SliceKind::Behavior,
+            families: Vec::new(),
+            members: Vec::new(),
+            depends_on: Vec::new(),
+            reasons: Vec::new(),
+            proof_surface: ProofSurface::default(),
+            fingerprint: None,
+        };
+        let json = serde_json::to_string(&slice).unwrap();
+        assert!(
+            !json.contains("fingerprint"),
+            "None fingerprint must be omitted from JSON"
+        );
+    }
+
+    #[test]
+    fn slice_fingerprint_serde_some_present() {
+        let slice = Slice {
+            id: "test".to_string(),
+            title: "Test".to_string(),
+            kind: SliceKind::Behavior,
+            families: Vec::new(),
+            members: Vec::new(),
+            depends_on: Vec::new(),
+            reasons: Vec::new(),
+            proof_surface: ProofSurface::default(),
+            fingerprint: Some("abc123".to_string()),
+        };
+        let json = serde_json::to_string(&slice).unwrap();
+        assert!(
+            json.contains("\"fingerprint\":\"abc123\""),
+            "Some fingerprint must be present in JSON, got: {}",
+            json
+        );
+
+        // Round-trip
+        let deserialized: Slice = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized.fingerprint,
+            Some("abc123".to_string()),
+            "fingerprint must round-trip through serde"
+        );
     }
 }
