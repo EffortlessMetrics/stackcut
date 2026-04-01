@@ -55,6 +55,9 @@ enum Commands {
         config: Option<PathBuf>,
         #[arg(long)]
         overrides: Option<PathBuf>,
+        /// Print plan JSON to stdout without writing files.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Render a stored plan as readable Markdown.
     Explain { plan: PathBuf },
@@ -134,6 +137,7 @@ fn run() -> Result<i32> {
             out_dir,
             config,
             overrides,
+            dry_run,
         } => cmd_plan(
             &repo,
             &base,
@@ -141,6 +145,7 @@ fn run() -> Result<i32> {
             &out_dir,
             config.as_deref(),
             overrides.as_deref(),
+            dry_run,
         ),
         Commands::Explain { plan } => cmd_explain(&plan),
         Commands::Validate {
@@ -171,6 +176,7 @@ fn cmd_plan(
     out_dir: &Path,
     config_path: Option<&Path>,
     override_path: Option<&Path>,
+    dry_run: bool,
 ) -> Result<i32> {
     let repo_root = stackcut_git::discover_repo_root(repo)
         .with_context(|| format!("failed to discover git repo from {}", repo.display()))?;
@@ -196,6 +202,15 @@ fn cmd_plan(
 
     let (source, units) = stackcut_git::collect_edit_units(&repo_root, base, head, &config)?;
     let plan = build_plan(source, units, &config, &overrides);
+
+    if dry_run {
+        let mut plan_with_fp = plan.clone();
+        plan_with_fp.fingerprint = Some(compute_fingerprint(&plan));
+        let json =
+            serde_json::to_string_pretty(&plan_with_fp).context("failed to serialize plan")?;
+        println!("{json}");
+        return Ok(ExitCode::Success as i32);
+    }
 
     fs::create_dir_all(out_dir)
         .with_context(|| format!("failed to create {}", out_dir.display()))?;
@@ -1120,6 +1135,7 @@ mod tests {
                     assert!(help.contains("--head"), "plan help missing --head");
                     assert!(help.contains("--repo"), "plan help missing --repo");
                     assert!(help.contains("--out-dir"), "plan help missing --out-dir");
+                    assert!(help.contains("--dry-run"), "plan help missing --dry-run");
                 }
                 "explain" => {
                     assert!(
@@ -1373,6 +1389,42 @@ mod tests {
         assert_eq!(check.status, DoctorStatus::Error);
         assert!(check.message.contains("no git repository found"));
         assert!(root.is_none());
+    }
+
+    // ── Plan dry-run tests ────────────────────────────────────────────
+
+    #[test]
+    fn plan_subcommand_has_dry_run_arg() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let plan_sub = cmd
+            .get_subcommands()
+            .find(|s| s.get_name() == "plan")
+            .expect("CLI missing 'plan' subcommand");
+        let has_dry_run = plan_sub.get_arguments().any(|a| a.get_id() == "dry_run");
+        assert!(has_dry_run, "plan subcommand missing --dry-run arg");
+    }
+
+    #[test]
+    fn plan_help_contains_dry_run_flag() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let plan_sub = cmd
+            .get_subcommands()
+            .find(|s| s.get_name() == "plan")
+            .expect("CLI missing 'plan' subcommand");
+        let mut sub_clone = plan_sub.clone();
+        let mut buf = Vec::new();
+        sub_clone.write_long_help(&mut buf).unwrap();
+        let help = String::from_utf8(buf).unwrap();
+        assert!(
+            help.contains("--dry-run"),
+            "plan help missing --dry-run flag"
+        );
+        assert!(
+            help.contains("Print plan JSON to stdout without writing files"),
+            "plan help missing --dry-run description"
+        );
     }
 
     // Feature: stackcut-v01-completion, Property 22: Unsupported Plan Version Rejection

@@ -18,4 +18,3 @@ stackcut-git = { path = "../stackcut-git" }
 [dev-dependencies]
 proptest.workspace = true
 tempfile.workspace = true
-serde_json.workspace = true
