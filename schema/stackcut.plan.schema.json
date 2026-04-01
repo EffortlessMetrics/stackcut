@@ -73,6 +73,13 @@
         "null"
       ],
       "description": "SHA-256 hash of plan content excluding this field"
+    },
+    "override_fingerprint": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "SHA-256 fingerprint of the overrides used during planning"
     }
   },
   "additionalProperties": false,

@@ -643,6 +643,7 @@ mod tests {
                 message: "summary smoke".to_string(),
             }],
             fingerprint: None,
+            override_fingerprint: None,
         };
 
         let rendered = render_summary(&plan);
@@ -764,6 +765,7 @@ mod tests {
                 ambiguities: Vec::new(),
                 diagnostics,
                 fingerprint: None,
+                override_fingerprint: None,
             })
     }
 
@@ -1216,6 +1218,7 @@ mod tests {
             ambiguities: Vec::new(),
             diagnostics: Vec::new(),
             fingerprint: None,
+            override_fingerprint: None,
         }
     }
 
@@ -1501,6 +1504,7 @@ mod tests {
             ambiguities: Vec::new(),
             diagnostics: Vec::new(),
             fingerprint: None,
+            override_fingerprint: None,
         }
     }
 
