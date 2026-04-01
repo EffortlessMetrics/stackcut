@@ -3,10 +3,10 @@ use clap::{Parser, Subcommand};
 use serde::de::DeserializeOwned;
 use stackcut_artifact::{
     compare_plans, compute_fingerprint, read_plan, render_comparison, render_proof_hints,
-    render_sarif, render_slice_explanation, render_summary, scaffold_overrides,
-    write_diagnostics_envelope, write_plan, write_receipt, write_summary, FingerprintCheck,
-    RecompositionReceipt, RecompositionStatus, RecompositionVerdict, SliceHash, StructuralResult,
-    ValidationResult,
+    render_review_packet, render_sarif, render_slice_explanation, render_summary,
+    scaffold_overrides, write_diagnostics_envelope, write_plan, write_receipt, write_summary,
+    FingerprintCheck, RecompositionReceipt, RecompositionStatus, RecompositionVerdict, SliceHash,
+    StructuralResult, ValidationResult,
 };
 use stackcut_core::{
     parse_config, plan as build_plan, structural_validate, DiagnosticLevel, Overrides,
@@ -145,6 +145,14 @@ enum Commands {
         #[arg(long, short)]
         output: Option<PathBuf>,
     },
+    /// Emit a PR-ready review packet from a plan.
+    EmitReviewPacket {
+        /// Path to the plan.json.
+        plan: PathBuf,
+        /// Write to file instead of stdout.
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -201,6 +209,9 @@ fn run() -> Result<i32> {
         } => cmd_scaffold_overrides(&plan, &output, force),
         Commands::EmitSarif { plan, output } => cmd_emit_sarif(&plan, output.as_deref()),
         Commands::EmitProof { plan, output } => cmd_emit_proof(&plan, output.as_deref()),
+        Commands::EmitReviewPacket { plan, output } => {
+            cmd_emit_review_packet(&plan, output.as_deref())
+        }
     }
 }
 
@@ -1134,6 +1145,26 @@ fn cmd_emit_sarif(plan_path: &Path, output: Option<&Path>) -> Result<i32> {
     Ok(ExitCode::Success as i32)
 }
 
+fn cmd_emit_review_packet(plan_path: &Path, output: Option<&Path>) -> Result<i32> {
+    let plan = read_plan(plan_path)?;
+    let packet = render_review_packet(&plan);
+    match output {
+        Some(path) => {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            fs::write(path, &packet)
+                .with_context(|| format!("failed to write {}", path.display()))?;
+            println!("wrote {}", path.display());
+        }
+        None => {
+            print!("{}", packet);
+        }
+    }
+    Ok(ExitCode::Success as i32)
+}
+
 fn load_toml_or_default<T>(path: Option<&Path>) -> Result<T>
 where
     T: DeserializeOwned + Default,
@@ -1258,6 +1289,10 @@ mod tests {
             subcommand_names.contains(&"emit-proof"),
             "CLI missing 'emit-proof' subcommand"
         );
+        assert!(
+            subcommand_names.contains(&"emit-review-packet"),
+            "CLI missing 'emit-review-packet' subcommand"
+        );
     }
 
     #[test]
@@ -1295,6 +1330,10 @@ mod tests {
         assert!(
             help.contains("emit-proof"),
             "Root help missing 'emit-proof' subcommand"
+        );
+        assert!(
+            help.contains("emit-review-packet"),
+            "Root help missing 'emit-review-packet' subcommand"
         );
 
         // Stability: generating help twice produces identical output
@@ -1370,6 +1409,16 @@ mod tests {
                     assert!(
                         help.contains("--output"),
                         "emit-proof help missing --output"
+                    );
+                }
+                "emit-review-packet" => {
+                    assert!(
+                        help.contains("<PLAN>") || help.contains("plan"),
+                        "emit-review-packet help missing plan argument"
+                    );
+                    assert!(
+                        help.contains("--output"),
+                        "emit-review-packet help missing --output"
                     );
                 }
                 _ => {} // help subcommand auto-added by clap

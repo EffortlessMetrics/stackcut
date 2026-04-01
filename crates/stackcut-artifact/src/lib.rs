@@ -600,6 +600,217 @@ pub fn render_proof_hints(plan: &Plan) -> String {
     output
 }
 
+fn topological_order(slices: &[stackcut_core::Slice]) -> Vec<usize> {
+    use std::collections::HashMap;
+
+    let id_to_idx: HashMap<&str, usize> = slices
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.id.as_str(), i))
+        .collect();
+
+    let mut in_degree: Vec<usize> = vec![0; slices.len()];
+    let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); slices.len()];
+
+    for (i, slice) in slices.iter().enumerate() {
+        for dep_id in &slice.depends_on {
+            if let Some(&dep_idx) = id_to_idx.get(dep_id.as_str()) {
+                in_degree[i] += 1;
+                dependents[dep_idx].push(i);
+            }
+        }
+    }
+
+    // Use a BTreeSet so that when multiple slices become ready simultaneously,
+    // the one with the lowest original index in plan.slices is chosen first.
+    let mut ready: BTreeSet<usize> = BTreeSet::new();
+    for (i, &deg) in in_degree.iter().enumerate() {
+        if deg == 0 {
+            ready.insert(i);
+        }
+    }
+
+    let mut order = Vec::with_capacity(slices.len());
+    while let Some(&idx) = ready.iter().next() {
+        ready.remove(&idx);
+        order.push(idx);
+        for &dep_idx in &dependents[idx] {
+            in_degree[dep_idx] -= 1;
+            if in_degree[dep_idx] == 0 {
+                ready.insert(dep_idx);
+            }
+        }
+    }
+
+    if order.len() < slices.len() {
+        for i in 0..slices.len() {
+            if !order.contains(&i) {
+                order.push(i);
+            }
+        }
+    }
+
+    order
+}
+
+fn format_slice_kind(kind: &stackcut_core::SliceKind) -> &'static str {
+    use stackcut_core::SliceKind;
+    match kind {
+        SliceKind::PrepRefactor => "PrepRefactor",
+        SliceKind::Behavior => "Behavior",
+        SliceKind::TestsDocs => "TestsDocs",
+        SliceKind::Generated => "Generated",
+        SliceKind::Mechanical => "Mechanical",
+        SliceKind::OpsConfig => "OpsConfig",
+        SliceKind::ApiSchema => "ApiSchema",
+        SliceKind::Misc => "Misc",
+    }
+}
+
+/// Render a PR-ready review packet from a plan.
+pub fn render_review_packet(plan: &Plan) -> String {
+    use std::collections::HashMap;
+
+    let mut output = String::new();
+
+    let unit_map: HashMap<&str, &stackcut_core::EditUnit> =
+        plan.units.iter().map(|u| (u.id.as_str(), u)).collect();
+
+    let topo = topological_order(&plan.slices);
+
+    let id_to_topo_pos: HashMap<&str, usize> = topo
+        .iter()
+        .enumerate()
+        .map(|(pos, &idx)| (plan.slices[idx].id.as_str(), pos + 1))
+        .collect();
+
+    let mut review_before: HashMap<&str, Vec<&str>> = HashMap::new();
+    for slice in &plan.slices {
+        for dep_id in &slice.depends_on {
+            review_before
+                .entry(dep_id.as_str())
+                .or_default()
+                .push(slice.id.as_str());
+        }
+    }
+
+    output.push_str("# Stack Review Packet\n\n");
+    output.push_str(&format!(
+        "**Base:** `{}` | **Head:** `{}` | **Slices:** {} | **Ambiguities:** {}\n\n",
+        plan.source.base,
+        plan.source.head,
+        plan.slices.len(),
+        plan.ambiguities.len()
+    ));
+
+    output.push_str("## Review Order\n\n");
+    for (pos, &idx) in topo.iter().enumerate() {
+        let slice = &plan.slices[idx];
+        let num = pos + 1;
+        let mut line = format!(
+            "{}. `{}` \u{2014} {} ({})",
+            num,
+            slice.id,
+            slice.title,
+            format_slice_kind(&slice.kind)
+        );
+        if !slice.depends_on.is_empty() {
+            line.push_str(&format!(
+                " \u{2014} depends on: {}",
+                slice.depends_on.join(", ")
+            ));
+        }
+        output.push_str(&line);
+        output.push('\n');
+    }
+
+    output.push_str("\n---\n");
+
+    for (pos, &idx) in topo.iter().enumerate() {
+        let slice = &plan.slices[idx];
+        let num = pos + 1;
+
+        output.push_str(&format!(
+            "\n## {}. `{}` \u{2014} {}\n\n",
+            num, slice.id, slice.title
+        ));
+
+        let families_str = if slice.families.is_empty() {
+            "(none)".to_string()
+        } else {
+            slice.families.join(", ")
+        };
+
+        output.push_str(&format!(
+            "**Kind:** {} | **Families:** {} | **Files:** {}\n\n",
+            format_slice_kind(&slice.kind),
+            families_str,
+            slice.members.len()
+        ));
+
+        if !slice.members.is_empty() {
+            output.push_str("| Status | Path |\n");
+            output.push_str("|--------|------|\n");
+            for member_id in &slice.members {
+                if let Some(unit) = unit_map.get(member_id.as_str()) {
+                    let status_str = format_change_status(&unit.status);
+                    let path_str = match (&unit.status, &unit.old_path) {
+                        (stackcut_core::ChangeStatus::Renamed, Some(old))
+                        | (stackcut_core::ChangeStatus::Copied, Some(old)) => {
+                            format!("`{}` \u{2192} `{}`", old, unit.path)
+                        }
+                        _ => format!("`{}`", unit.path),
+                    };
+                    output.push_str(&format!("| {} | {} |\n", status_str, path_str));
+                } else {
+                    output.push_str(&format!("| ? | `{}` |\n", member_id));
+                }
+            }
+            output.push('\n');
+        }
+
+        if !slice.reasons.is_empty() {
+            output.push_str("**Why this slice exists:**\n");
+            for reason in &slice.reasons {
+                output.push_str(&format!("- `{}`: {}\n", reason.code, reason.message));
+            }
+            output.push('\n');
+        }
+
+        if let Some(dependents) = review_before.get(slice.id.as_str()) {
+            let mut sorted: Vec<&str> = dependents.clone();
+            sorted.sort_by_key(|id| id_to_topo_pos.get(id).copied().unwrap_or(usize::MAX));
+            output.push_str(&format!("**Review before:** {}\n", sorted.join(", ")));
+            output.push('\n');
+        }
+
+        output.push_str("---\n");
+    }
+
+    if !plan.ambiguities.is_empty() {
+        output.push_str("\n## Ambiguities\n\n");
+        for ambiguity in &plan.ambiguities {
+            output.push_str(&format!("### `{}`\n\n", ambiguity.id));
+            output.push_str(&format!("{}\n\n", ambiguity.message));
+            if !ambiguity.affected_units.is_empty() {
+                output.push_str(&format!(
+                    "- **Affected units:** {}\n",
+                    ambiguity.affected_units.join(", ")
+                ));
+            }
+            if !ambiguity.candidate_slices.is_empty() {
+                output.push_str(&format!(
+                    "- **Candidate slices:** {}\n",
+                    ambiguity.candidate_slices.join(", ")
+                ));
+            }
+            output.push_str(&format!("- **Resolution:** {}\n\n", ambiguity.resolution));
+        }
+    }
+
+    output
+}
+
 pub fn render_summary(plan: &Plan) -> String {
     let mut output = String::new();
 
@@ -2969,5 +3180,202 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── Review packet tests ────────────────────────────────────────────
+
+    fn make_review_packet_plan() -> Plan {
+        Plan {
+            version: "0.1.0".to_string(),
+            source: PlanSource {
+                repo_root: None,
+                base: "abc1234".to_string(),
+                head: "def5678".to_string(),
+                head_tree: None,
+            },
+            units: vec![
+                EditUnit {
+                    id: "path:src/core/old_name.rs".to_string(),
+                    path: "src/core/new_name.rs".to_string(),
+                    old_path: Some("src/core/old_name.rs".to_string()),
+                    status: ChangeStatus::Renamed,
+                    kind: UnitKind::Mechanical,
+                    family: "core".to_string(),
+                    notes: Vec::new(),
+                },
+                EditUnit {
+                    id: "path:src/core/planner.rs".to_string(),
+                    path: "src/core/planner.rs".to_string(),
+                    old_path: None,
+                    status: ChangeStatus::Modified,
+                    kind: UnitKind::Behavior,
+                    family: "core".to_string(),
+                    notes: Vec::new(),
+                },
+                EditUnit {
+                    id: "path:tests/core_test.rs".to_string(),
+                    path: "tests/core_test.rs".to_string(),
+                    old_path: None,
+                    status: ChangeStatus::Added,
+                    kind: UnitKind::Test,
+                    family: "core".to_string(),
+                    notes: Vec::new(),
+                },
+                EditUnit {
+                    id: "path:Cargo.toml".to_string(),
+                    path: "Cargo.toml".to_string(),
+                    old_path: None,
+                    status: ChangeStatus::Modified,
+                    kind: UnitKind::Manifest,
+                    family: "workspace".to_string(),
+                    notes: Vec::new(),
+                },
+            ],
+            slices: vec![
+                Slice {
+                    id: "mechanical-renames".to_string(),
+                    title: "Mechanical rename-only changes".to_string(),
+                    kind: SliceKind::PrepRefactor,
+                    families: vec!["core".to_string()],
+                    members: vec!["path:src/core/old_name.rs".to_string()],
+                    depends_on: Vec::new(),
+                    reasons: vec![InclusionReason {
+                        code: "mechanical-split".to_string(),
+                        message: "Rename-only changes peel off as a prep slice when independent."
+                            .to_string(),
+                    }],
+                    proof_surface: ProofSurface::default(),
+                    fingerprint: None,
+                },
+                Slice {
+                    id: "api-schema-workspace".to_string(),
+                    title: "Manifest and lockstep package metadata".to_string(),
+                    kind: SliceKind::ApiSchema,
+                    families: vec!["workspace".to_string()],
+                    members: vec!["path:Cargo.toml".to_string()],
+                    depends_on: Vec::new(),
+                    reasons: vec![],
+                    proof_surface: ProofSurface::default(),
+                    fingerprint: None,
+                },
+                Slice {
+                    id: "behavior-core".to_string(),
+                    title: "Behavior: core".to_string(),
+                    kind: SliceKind::Behavior,
+                    families: vec!["core".to_string()],
+                    members: vec!["path:src/core/planner.rs".to_string()],
+                    depends_on: vec![
+                        "mechanical-renames".to_string(),
+                        "api-schema-workspace".to_string(),
+                    ],
+                    reasons: vec![],
+                    proof_surface: ProofSurface::default(),
+                    fingerprint: None,
+                },
+                Slice {
+                    id: "tests-docs-core".to_string(),
+                    title: "Docs/tests: core".to_string(),
+                    kind: SliceKind::TestsDocs,
+                    families: vec!["core".to_string()],
+                    members: vec!["path:tests/core_test.rs".to_string()],
+                    depends_on: vec!["behavior-core".to_string()],
+                    reasons: vec![],
+                    proof_surface: ProofSurface::default(),
+                    fingerprint: None,
+                },
+            ],
+            ambiguities: vec![Ambiguity {
+                id: "ambig-1".to_string(),
+                message: "Could not determine family for file.".to_string(),
+                affected_units: vec!["path:src/core/planner.rs".to_string()],
+                candidate_slices: vec![
+                    "behavior-core".to_string(),
+                    "mechanical-renames".to_string(),
+                ],
+                resolution: "assigned to behavior-core by heuristic".to_string(),
+            }],
+            diagnostics: Vec::new(),
+            fingerprint: None,
+            override_fingerprint: None,
+        }
+    }
+
+    #[test]
+    fn review_packet_contains_all_slice_ids() {
+        let plan = make_review_packet_plan();
+        let packet = render_review_packet(&plan);
+        for slice in &plan.slices {
+            assert!(
+                packet.contains(&slice.id),
+                "review packet missing slice ID '{}'",
+                slice.id
+            );
+        }
+    }
+
+    #[test]
+    fn review_packet_contains_all_file_paths() {
+        let plan = make_review_packet_plan();
+        let packet = render_review_packet(&plan);
+        for unit in &plan.units {
+            assert!(
+                packet.contains(&unit.path),
+                "review packet missing file path '{}'",
+                unit.path
+            );
+        }
+    }
+
+    #[test]
+    fn review_packet_topological_ordering() {
+        let plan = make_review_packet_plan();
+        let packet = render_review_packet(&plan);
+
+        let pos_mechanical = packet.find("mechanical-renames").unwrap();
+        let pos_api = packet.find("api-schema-workspace").unwrap();
+        let pos_behavior = packet.find("behavior-core").unwrap();
+        let pos_tests = packet.find("tests-docs-core").unwrap();
+
+        assert!(pos_mechanical < pos_behavior);
+        assert!(pos_api < pos_behavior);
+        assert!(pos_behavior < pos_tests);
+    }
+
+    #[test]
+    fn review_packet_rename_shows_old_to_new() {
+        let plan = make_review_packet_plan();
+        let packet = render_review_packet(&plan);
+
+        assert!(packet.contains("src/core/old_name.rs"));
+        assert!(packet.contains("src/core/new_name.rs"));
+        assert!(packet.contains("`src/core/old_name.rs` \u{2192} `src/core/new_name.rs`"));
+    }
+
+    #[test]
+    fn review_packet_contains_ambiguities() {
+        let plan = make_review_packet_plan();
+        let packet = render_review_packet(&plan);
+
+        assert!(packet.contains("Ambiguities"));
+        assert!(packet.contains("ambig-1"));
+        assert!(packet.contains("Could not determine family for file."));
+    }
+
+    #[test]
+    fn review_packet_contains_review_before() {
+        let plan = make_review_packet_plan();
+        let packet = render_review_packet(&plan);
+        assert!(packet.contains("**Review before:**"));
+    }
+
+    #[test]
+    fn review_packet_header_contains_counts() {
+        let plan = make_review_packet_plan();
+        let packet = render_review_packet(&plan);
+
+        assert!(packet.contains("**Slices:** 4"));
+        assert!(packet.contains("**Ambiguities:** 1"));
+        assert!(packet.contains("**Base:** `abc1234`"));
+        assert!(packet.contains("**Head:** `def5678`"));
     }
 }
