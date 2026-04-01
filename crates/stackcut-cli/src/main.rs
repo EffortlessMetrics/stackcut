@@ -286,6 +286,9 @@ fn cmd_init(repo: &Path, force: bool) -> Result<i32> {
 }
 
 fn generate_initial_config(repo_root: &Path) -> StackcutConfig {
+    // Only check the repository root for manifests and lock files.  Nested
+    // manifests (e.g. workspace member Cargo.toml files) are intentionally
+    // excluded because the planner already groups them via path_families.
     let manifest_candidates = [
         "Cargo.toml",
         "package.json",
@@ -437,7 +440,8 @@ fn render_config_toml(config: &StackcutConfig) -> String {
         for rule in &config.path_families {
             out.push_str(&format!(
                 "\n[[path_families]]\nprefix = \"{}\"\nfamily = \"{}\"\n",
-                rule.prefix, rule.family
+                escape_toml_string(&rule.prefix),
+                escape_toml_string(&rule.family)
             ));
         }
     }
@@ -452,11 +456,22 @@ fn render_config_toml(config: &StackcutConfig) -> String {
     out
 }
 
+/// Escape a string for embedding in a TOML quoted value.
+///
+/// Handles backslashes and double-quotes so the rendered TOML stays valid even
+/// if a path prefix or family name contains those characters.
+fn escape_toml_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 fn format_string_array(items: &[String]) -> String {
     if items.is_empty() {
         return "[]".to_string();
     }
-    let inner: Vec<String> = items.iter().map(|s| format!("\"{}\"", s)).collect();
+    let inner: Vec<String> = items
+        .iter()
+        .map(|s| format!("\"{}\"", escape_toml_string(s)))
+        .collect();
     format!("[{}]", inner.join(", "))
 }
 
@@ -814,5 +829,38 @@ mod tests {
         let parsed: StackcutConfig = toml::from_str(&toml_str).expect("rendered TOML should parse");
         assert_eq!(parsed.version, 1);
         assert!(parsed.path_families.is_empty());
+    }
+
+    #[test]
+    fn escape_toml_string_handles_special_chars() {
+        assert_eq!(escape_toml_string("plain"), "plain");
+        assert_eq!(escape_toml_string(r#"has"quote"#), r#"has\"quote"#);
+        assert_eq!(escape_toml_string(r"back\slash"), r"back\\slash");
+        assert_eq!(escape_toml_string(r#"both\"chars"#), r#"both\\\"chars"#);
+    }
+
+    #[test]
+    fn render_config_toml_special_chars_roundtrip() {
+        let config = StackcutConfig {
+            version: 1,
+            generated_prefixes: vec![],
+            manifest_files: vec![r#"path with "quotes".toml"#.to_string()],
+            lock_files: vec![],
+            test_prefixes: vec![r"back\slash/".to_string()],
+            doc_prefixes: vec![],
+            ops_prefixes: vec![],
+            path_families: vec![PathFamilyRule {
+                prefix: r#"src/weird"dir/"#.to_string(),
+                family: r#"weird"name"#.to_string(),
+            }],
+            review_budget: None,
+        };
+
+        let toml_str = render_config_toml(&config);
+        let parsed: StackcutConfig =
+            toml::from_str(&toml_str).expect("rendered TOML with special chars should parse");
+        assert_eq!(parsed.manifest_files, config.manifest_files);
+        assert_eq!(parsed.test_prefixes, config.test_prefixes);
+        assert_eq!(parsed.path_families, config.path_families);
     }
 }
