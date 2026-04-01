@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use stackcut_core::{Diagnostic, DiagnosticLevel, Plan};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -89,6 +90,130 @@ pub fn write_plan(path: &Path, plan: &Plan) -> Result<()> {
     fs::write(path, format!("{json}\n"))
         .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
+}
+
+/// Escape a string for use as a TOML quoted value.
+/// Handles `\` → `\\` and `"` → `\"`.
+fn escape_toml_value(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+pub fn scaffold_overrides(plan: &Plan) -> String {
+    let mut out = String::new();
+
+    // Header
+    out.push_str("# stackcut override file\n");
+    out.push_str("# Generated from plan. Edit to customize slice membership and ordering.\n");
+    out.push_str("# See examples/override.toml for reference.\n");
+    out.push_str("version = 1\n");
+
+    // === Ambiguity resolutions ===
+    if !plan.ambiguities.is_empty() {
+        out.push_str("\n# === Ambiguity resolutions ===\n");
+        out.push_str("# The following ambiguities were detected. Uncomment and edit to resolve.\n");
+
+        for ambiguity in &plan.ambiguities {
+            out.push_str(&format!("\n# Ambiguity: {}\n", ambiguity.message));
+            if !ambiguity.candidate_slices.is_empty() {
+                out.push_str(&format!(
+                    "# Candidates: {}\n",
+                    ambiguity.candidate_slices.join(", ")
+                ));
+            }
+
+            let target_slice = ambiguity
+                .candidate_slices
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "UNKNOWN".to_string());
+            let alternatives: Vec<&str> = ambiguity
+                .candidate_slices
+                .iter()
+                .skip(1)
+                .map(|s| s.as_str())
+                .collect();
+
+            for unit in &ambiguity.affected_units {
+                out.push_str("# [[force_members]]\n");
+                out.push_str(&format!("# member = \"{}\"\n", escape_toml_value(unit)));
+                if alternatives.is_empty() {
+                    out.push_str(&format!(
+                        "# slice = \"{}\"\n",
+                        escape_toml_value(&target_slice)
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "# slice = \"{}\"  # or: {}\n",
+                        escape_toml_value(&target_slice),
+                        alternatives.join(", ")
+                    ));
+                }
+                out.push_str(&format!(
+                    "# reason = \"Resolve ambiguity: attach {} to preferred slice\"\n",
+                    escape_toml_value(unit)
+                ));
+            }
+
+            // If 2+ affected units, generate a must_link entry
+            if ambiguity.affected_units.len() >= 2 {
+                out.push_str("# [[must_link]]\n");
+                out.push_str(&format!(
+                    "# members = [{}]\n",
+                    ambiguity
+                        .affected_units
+                        .iter()
+                        .map(|u| format!("\"{}\"", escape_toml_value(u)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                out.push_str("# reason = \"Keep ambiguous units together\"\n");
+            }
+        }
+    }
+
+    // === Slice renames ===
+    if !plan.slices.is_empty() {
+        out.push_str("\n# === Slice renames ===\n");
+        out.push_str("# Uncomment to give slices more descriptive titles.\n");
+        for slice in &plan.slices {
+            out.push_str("# [[rename_slices]]\n");
+            out.push_str(&format!("# id = \"{}\"\n", escape_toml_value(&slice.id)));
+            out.push_str(&format!(
+                "# title = \"{}\"\n",
+                escape_toml_value(&slice.title)
+            ));
+        }
+    }
+
+    // === Ordering constraints ===
+    // Find pairs where one slice depends on another
+    let ordering_pairs: Vec<(&str, &str)> = plan
+        .slices
+        .iter()
+        .flat_map(|slice| {
+            slice
+                .depends_on
+                .iter()
+                .map(move |dep| (dep.as_str(), slice.id.as_str()))
+        })
+        .collect();
+
+    if !ordering_pairs.is_empty() {
+        out.push_str("\n# === Ordering constraints ===\n");
+        out.push_str("# Uncomment to enforce review order between slices.\n");
+        for (before, after) in &ordering_pairs {
+            out.push_str("# [[must_order]]\n");
+            out.push_str(&format!("# before = \"{}\"\n", escape_toml_value(before)));
+            out.push_str(&format!("# after = \"{}\"\n", escape_toml_value(after)));
+            out.push_str(&format!(
+                "# reason = \"{} should land before {}\"\n",
+                escape_toml_value(before),
+                escape_toml_value(after)
+            ));
+        }
+    }
+
+    out
 }
 
 pub fn write_diagnostics(path: &Path, diagnostics: &[Diagnostic]) -> Result<()> {
@@ -220,14 +345,266 @@ pub fn render_summary(plan: &Plan) -> String {
     output
 }
 
+// ── Plan comparison ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanComparison {
+    pub old_fingerprint: Option<String>,
+    pub new_fingerprint: Option<String>,
+    pub slices_added: Vec<String>,
+    pub slices_removed: Vec<String>,
+    pub slices_unchanged: Vec<String>,
+    pub slices_modified: Vec<SliceDiff>,
+    pub units_moved: Vec<UnitMove>,
+    pub source_changed: bool,
+    pub equivalence: Equivalence,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SliceDiff {
+    pub slice_id: String,
+    pub members_added: Vec<String>,
+    pub members_removed: Vec<String>,
+    pub title_changed: bool,
+    pub old_title: Option<String>,
+    pub new_title: Option<String>,
+    pub depends_on_changed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnitMove {
+    pub unit_id: String,
+    pub old_slice: String,
+    pub new_slice: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Equivalence {
+    /// Both plans cover exactly the same set of unit IDs.
+    UnitEquivalent,
+    /// The unit sets differ.
+    UnitsDiffer,
+}
+
+/// Compare two plans and produce a structured comparison.
+pub fn compare_plans(old: &Plan, new: &Plan) -> PlanComparison {
+    let old_fp = Some(compute_fingerprint(old));
+    let new_fp = Some(compute_fingerprint(new));
+
+    // Index slices by ID for both plans, keeping the first occurrence when
+    // duplicates exist (malformed plans). Warn on stderr about any duplicates.
+    let mut old_slices: BTreeMap<&str, &stackcut_core::Slice> = BTreeMap::new();
+    for s in &old.slices {
+        if old_slices.contains_key(s.id.as_str()) {
+            eprintln!(
+                "warning: duplicate slice ID '{}' in old plan; using first occurrence",
+                s.id
+            );
+        } else {
+            old_slices.insert(s.id.as_str(), s);
+        }
+    }
+    let mut new_slices: BTreeMap<&str, &stackcut_core::Slice> = BTreeMap::new();
+    for s in &new.slices {
+        if new_slices.contains_key(s.id.as_str()) {
+            eprintln!(
+                "warning: duplicate slice ID '{}' in new plan; using first occurrence",
+                s.id
+            );
+        } else {
+            new_slices.insert(s.id.as_str(), s);
+        }
+    }
+
+    let old_ids: BTreeSet<&str> = old_slices.keys().copied().collect();
+    let new_ids: BTreeSet<&str> = new_slices.keys().copied().collect();
+
+    let slices_added: Vec<String> = new_ids
+        .difference(&old_ids)
+        .map(|s| s.to_string())
+        .collect();
+    let slices_removed: Vec<String> = old_ids
+        .difference(&new_ids)
+        .map(|s| s.to_string())
+        .collect();
+
+    let common_ids: BTreeSet<&str> = old_ids.intersection(&new_ids).copied().collect();
+
+    let mut slices_unchanged = Vec::new();
+    let mut slices_modified = Vec::new();
+
+    for id in &common_ids {
+        let old_slice = old_slices[id];
+        let new_slice = new_slices[id];
+
+        let old_members: BTreeSet<&str> = old_slice.members.iter().map(|s| s.as_str()).collect();
+        let new_members: BTreeSet<&str> = new_slice.members.iter().map(|s| s.as_str()).collect();
+
+        let title_changed = old_slice.title != new_slice.title;
+        let members_same = old_members == new_members;
+        let depends_on_changed = old_slice.depends_on != new_slice.depends_on;
+
+        if members_same && !title_changed && !depends_on_changed {
+            slices_unchanged.push(id.to_string());
+        } else {
+            let members_added: Vec<String> = new_members
+                .difference(&old_members)
+                .map(|s| s.to_string())
+                .collect();
+            let members_removed: Vec<String> = old_members
+                .difference(&new_members)
+                .map(|s| s.to_string())
+                .collect();
+            slices_modified.push(SliceDiff {
+                slice_id: id.to_string(),
+                members_added,
+                members_removed,
+                title_changed,
+                old_title: if title_changed {
+                    Some(old_slice.title.clone())
+                } else {
+                    None
+                },
+                new_title: if title_changed {
+                    Some(new_slice.title.clone())
+                } else {
+                    None
+                },
+                depends_on_changed,
+            });
+        }
+    }
+
+    // Build unit → owning-slice maps for both plans.
+    let old_unit_slice: BTreeMap<&str, &str> = old
+        .slices
+        .iter()
+        .flat_map(|s| s.members.iter().map(move |m| (m.as_str(), s.id.as_str())))
+        .collect();
+    let new_unit_slice: BTreeMap<&str, &str> = new
+        .slices
+        .iter()
+        .flat_map(|s| s.members.iter().map(move |m| (m.as_str(), s.id.as_str())))
+        .collect();
+
+    let mut units_moved = Vec::new();
+    for (unit_id, &old_sid) in &old_unit_slice {
+        if let Some(&new_sid) = new_unit_slice.get(unit_id) {
+            if old_sid != new_sid {
+                units_moved.push(UnitMove {
+                    unit_id: unit_id.to_string(),
+                    old_slice: old_sid.to_string(),
+                    new_slice: new_sid.to_string(),
+                });
+            }
+        }
+    }
+
+    // Check unit-set equivalence.
+    let old_unit_ids: BTreeSet<&str> = old.units.iter().map(|u| u.id.as_str()).collect();
+    let new_unit_ids: BTreeSet<&str> = new.units.iter().map(|u| u.id.as_str()).collect();
+    let equivalence = if old_unit_ids == new_unit_ids {
+        Equivalence::UnitEquivalent
+    } else {
+        Equivalence::UnitsDiffer
+    };
+
+    let source_changed = old.source != new.source;
+
+    PlanComparison {
+        old_fingerprint: old_fp,
+        new_fingerprint: new_fp,
+        slices_added,
+        slices_removed,
+        slices_unchanged,
+        slices_modified,
+        units_moved,
+        source_changed,
+        equivalence,
+    }
+}
+
+/// Render a human-readable Markdown summary of a plan comparison.
+pub fn render_comparison(comparison: &PlanComparison) -> String {
+    let mut out = String::new();
+
+    out.push_str("# stackcut plan comparison\n\n");
+
+    let old_fp = comparison.old_fingerprint.as_deref().unwrap_or("(none)");
+    let new_fp = comparison.new_fingerprint.as_deref().unwrap_or("(none)");
+    out.push_str(&format!("- fingerprint: `{old_fp}` → `{new_fp}`\n"));
+
+    let equiv_label = match comparison.equivalence {
+        Equivalence::UnitEquivalent => "unit-equivalent",
+        Equivalence::UnitsDiffer => "units-differ",
+    };
+    out.push_str(&format!("- equivalence: {equiv_label}\n"));
+
+    if comparison.source_changed {
+        out.push_str("- source: changed\n");
+    }
+
+    out.push_str(&format!(
+        "\n## slices added ({})\n",
+        comparison.slices_added.len()
+    ));
+    for id in &comparison.slices_added {
+        out.push_str(&format!("- `{id}`\n"));
+    }
+
+    out.push_str(&format!(
+        "\n## slices removed ({})\n",
+        comparison.slices_removed.len()
+    ));
+    for id in &comparison.slices_removed {
+        out.push_str(&format!("- `{id}`\n"));
+    }
+
+    out.push_str(&format!(
+        "\n## slices modified ({})\n",
+        comparison.slices_modified.len()
+    ));
+    for diff in &comparison.slices_modified {
+        out.push_str(&format!("### `{}`\n", diff.slice_id));
+        if diff.title_changed {
+            let old_t = diff.old_title.as_deref().unwrap_or("(none)");
+            let new_t = diff.new_title.as_deref().unwrap_or("(none)");
+            out.push_str(&format!("  - title: `{old_t}` → `{new_t}`\n"));
+        }
+        if diff.depends_on_changed {
+            out.push_str("  - depends_on: changed\n");
+        }
+        for m in &diff.members_added {
+            out.push_str(&format!("  - added: `{m}`\n"));
+        }
+        for m in &diff.members_removed {
+            out.push_str(&format!("  - removed: `{m}`\n"));
+        }
+    }
+
+    out.push_str(&format!(
+        "\n## units moved ({})\n",
+        comparison.units_moved.len()
+    ));
+    for mv in &comparison.units_moved {
+        out.push_str(&format!(
+            "- `{}`: `{}` → `{}`\n",
+            mv.unit_id, mv.old_slice, mv.new_slice
+        ));
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
     use stackcut_core::{
-        ChangeStatus, Diagnostic, DiagnosticLevel, EditUnit, ForceMemberOverride, InclusionReason,
-        MustLinkOverride, MustOrderOverride, Overrides, PathFamilyRule, Plan, PlanSource,
-        ProofSurface, RenameSliceOverride, Slice, SliceKind, StackcutConfig, UnitKind,
+        Ambiguity, ChangeStatus, Diagnostic, DiagnosticLevel, EditUnit, ForceMemberOverride,
+        InclusionReason, MustLinkOverride, MustOrderOverride, Overrides, PathFamilyRule, Plan,
+        PlanSource, ProofSurface, RenameSliceOverride, Slice, SliceKind, StackcutConfig, UnitKind,
     };
 
     #[test]
@@ -821,6 +1198,449 @@ mod tests {
             let deserialized: StackcutConfig = toml::from_str(&toml_str).unwrap();
             prop_assert_eq!(config, deserialized);
         }
+    }
+
+    // ── compare_plans tests ────────────────────────────────────────────────
+
+    fn make_plan(base: &str, head: &str, units: Vec<EditUnit>, slices: Vec<Slice>) -> Plan {
+        Plan {
+            version: "0.1.0".to_string(),
+            source: PlanSource {
+                repo_root: None,
+                base: base.to_string(),
+                head: head.to_string(),
+                head_tree: None,
+            },
+            units,
+            slices,
+            ambiguities: Vec::new(),
+            diagnostics: Vec::new(),
+            fingerprint: None,
+        }
+    }
+
+    fn make_unit(id: &str, family: &str) -> EditUnit {
+        EditUnit {
+            id: id.to_string(),
+            path: id.strip_prefix("path:").unwrap_or(id).to_string(),
+            old_path: None,
+            status: ChangeStatus::Modified,
+            kind: UnitKind::Behavior,
+            family: family.to_string(),
+            notes: Vec::new(),
+        }
+    }
+
+    fn make_slice(id: &str, title: &str, members: &[&str]) -> Slice {
+        Slice {
+            id: id.to_string(),
+            title: title.to_string(),
+            kind: SliceKind::Behavior,
+            families: Vec::new(),
+            members: members.iter().map(|s| s.to_string()).collect(),
+            depends_on: Vec::new(),
+            reasons: Vec::new(),
+            proof_surface: ProofSurface::default(),
+        }
+    }
+
+    #[test]
+    fn compare_identical_plans() {
+        let units = vec![make_unit("path:src/a.rs", "core")];
+        let slices = vec![make_slice("behavior-core", "Core", &["path:src/a.rs"])];
+        let plan = make_plan("aaa", "bbb", units, slices);
+
+        let cmp = compare_plans(&plan, &plan);
+        assert!(cmp.slices_added.is_empty());
+        assert!(cmp.slices_removed.is_empty());
+        assert!(cmp.slices_modified.is_empty());
+        assert!(cmp.units_moved.is_empty());
+        assert_eq!(cmp.slices_unchanged, vec!["behavior-core"]);
+        assert_eq!(cmp.equivalence, Equivalence::UnitEquivalent);
+        assert!(!cmp.source_changed);
+    }
+
+    #[test]
+    fn compare_added_and_removed_slices() {
+        let old_units = vec![make_unit("path:src/a.rs", "core")];
+        let old_slices = vec![make_slice("slice-old", "Old", &["path:src/a.rs"])];
+        let old = make_plan("aaa", "bbb", old_units, old_slices);
+
+        let new_units = vec![make_unit("path:src/b.rs", "auth")];
+        let new_slices = vec![make_slice("slice-new", "New", &["path:src/b.rs"])];
+        let new = make_plan("aaa", "bbb", new_units, new_slices);
+
+        let cmp = compare_plans(&old, &new);
+        assert_eq!(cmp.slices_added, vec!["slice-new"]);
+        assert_eq!(cmp.slices_removed, vec!["slice-old"]);
+        assert!(cmp.slices_unchanged.is_empty());
+        assert_eq!(cmp.equivalence, Equivalence::UnitsDiffer);
+    }
+
+    #[test]
+    fn compare_units_moved_between_slices() {
+        let units = vec![
+            make_unit("path:src/shared.rs", "shared"),
+            make_unit("path:src/other.rs", "other"),
+        ];
+
+        let old_slices = vec![
+            make_slice("slice-a", "A", &["path:src/shared.rs"]),
+            make_slice("slice-b", "B", &["path:src/other.rs"]),
+        ];
+        let old = make_plan("aaa", "bbb", units.clone(), old_slices);
+
+        let new_slices = vec![
+            make_slice("slice-a", "A", &["path:src/other.rs"]),
+            make_slice("slice-b", "B", &["path:src/shared.rs"]),
+        ];
+        let new = make_plan("aaa", "bbb", units, new_slices);
+
+        let cmp = compare_plans(&old, &new);
+        assert_eq!(cmp.units_moved.len(), 2);
+        assert_eq!(cmp.equivalence, Equivalence::UnitEquivalent);
+    }
+
+    #[test]
+    fn compare_modified_slice_members() {
+        let old_units = vec![
+            make_unit("path:src/a.rs", "core"),
+            make_unit("path:src/old.rs", "core"),
+        ];
+        let old_slices = vec![make_slice(
+            "behavior-core",
+            "Core",
+            &["path:src/a.rs", "path:src/old.rs"],
+        )];
+        let old = make_plan("aaa", "bbb", old_units, old_slices);
+
+        let new_units = vec![
+            make_unit("path:src/a.rs", "core"),
+            make_unit("path:src/new.rs", "core"),
+        ];
+        let new_slices = vec![make_slice(
+            "behavior-core",
+            "Core",
+            &["path:src/a.rs", "path:src/new.rs"],
+        )];
+        let new = make_plan("aaa", "bbb", new_units, new_slices);
+
+        let cmp = compare_plans(&old, &new);
+        assert!(cmp.slices_unchanged.is_empty());
+        assert_eq!(cmp.slices_modified.len(), 1);
+        let diff = &cmp.slices_modified[0];
+        assert_eq!(diff.slice_id, "behavior-core");
+        assert_eq!(diff.members_added, vec!["path:src/new.rs"]);
+        assert_eq!(diff.members_removed, vec!["path:src/old.rs"]);
+        assert!(!diff.title_changed);
+    }
+
+    #[test]
+    fn compare_source_changed() {
+        let units = vec![make_unit("path:src/a.rs", "core")];
+        let slices = vec![make_slice("s", "S", &["path:src/a.rs"])];
+        let old = make_plan("aaa", "bbb", units.clone(), slices.clone());
+        let new = make_plan("aaa", "ccc", units, slices);
+
+        let cmp = compare_plans(&old, &new);
+        assert!(cmp.source_changed);
+    }
+
+    #[test]
+    fn compare_title_changed() {
+        let units = vec![make_unit("path:src/a.rs", "core")];
+        let old_slices = vec![make_slice("s", "Old Title", &["path:src/a.rs"])];
+        let new_slices = vec![make_slice("s", "New Title", &["path:src/a.rs"])];
+        let old = make_plan("aaa", "bbb", units.clone(), old_slices);
+        let new = make_plan("aaa", "bbb", units, new_slices);
+
+        let cmp = compare_plans(&old, &new);
+        assert_eq!(cmp.slices_modified.len(), 1);
+        let diff = &cmp.slices_modified[0];
+        assert!(diff.title_changed);
+        assert_eq!(diff.old_title.as_deref(), Some("Old Title"));
+        assert_eq!(diff.new_title.as_deref(), Some("New Title"));
+    }
+
+    fn make_slice_with_deps(id: &str, title: &str, members: &[&str], deps: &[&str]) -> Slice {
+        let mut s = make_slice(id, title, members);
+        s.depends_on = deps.iter().map(|d| d.to_string()).collect();
+        s
+    }
+
+    #[test]
+    fn compare_depends_on_changed() {
+        let units = vec![make_unit("path:src/a.rs", "core")];
+        let old_slices = vec![make_slice("s", "S", &["path:src/a.rs"])];
+        let new_slices = vec![make_slice_with_deps(
+            "s",
+            "S",
+            &["path:src/a.rs"],
+            &["other"],
+        )];
+        let old = make_plan("aaa", "bbb", units.clone(), old_slices);
+        let new = make_plan("aaa", "bbb", units, new_slices);
+
+        let cmp = compare_plans(&old, &new);
+        assert!(cmp.slices_unchanged.is_empty());
+        assert_eq!(cmp.slices_modified.len(), 1);
+        let diff = &cmp.slices_modified[0];
+        assert!(diff.depends_on_changed);
+        assert!(!diff.title_changed);
+        assert!(diff.members_added.is_empty());
+        assert!(diff.members_removed.is_empty());
+    }
+
+    #[test]
+    fn compare_depends_on_unchanged() {
+        let units = vec![make_unit("path:src/a.rs", "core")];
+        let old_slices = vec![make_slice_with_deps("s", "S", &["path:src/a.rs"], &["dep"])];
+        let new_slices = vec![make_slice_with_deps("s", "S", &["path:src/a.rs"], &["dep"])];
+        let old = make_plan("aaa", "bbb", units.clone(), old_slices);
+        let new = make_plan("aaa", "bbb", units, new_slices);
+
+        let cmp = compare_plans(&old, &new);
+        assert_eq!(cmp.slices_unchanged, vec!["s"]);
+        assert!(cmp.slices_modified.is_empty());
+    }
+
+    #[test]
+    fn compare_source_changed_via_repo_root() {
+        let units = vec![make_unit("path:src/a.rs", "core")];
+        let slices = vec![make_slice("s", "S", &["path:src/a.rs"])];
+        let mut old = make_plan("aaa", "bbb", units.clone(), slices.clone());
+        let new = make_plan("aaa", "bbb", units, slices);
+        old.source.repo_root = Some("/old/root".to_string());
+
+        let cmp = compare_plans(&old, &new);
+        assert!(cmp.source_changed);
+    }
+
+    #[test]
+    fn compare_duplicate_slice_ids_uses_first() {
+        let units = vec![make_unit("path:src/a.rs", "core")];
+        let old_slices = vec![
+            make_slice("dup", "First", &["path:src/a.rs"]),
+            make_slice("dup", "Second", &["path:src/a.rs"]),
+        ];
+        let new_slices = vec![make_slice("dup", "First", &["path:src/a.rs"])];
+        let old = make_plan("aaa", "bbb", units.clone(), old_slices);
+        let new = make_plan("aaa", "bbb", units, new_slices);
+
+        let cmp = compare_plans(&old, &new);
+        // First occurrence ("First") matches new ("First") => unchanged
+        assert_eq!(cmp.slices_unchanged, vec!["dup"]);
+    }
+
+    #[test]
+    fn render_comparison_contains_expected_sections() {
+        let old_units = vec![
+            make_unit("path:src/a.rs", "core"),
+            make_unit("path:src/shared.rs", "shared"),
+        ];
+        let old_slices = vec![make_slice(
+            "behavior-core",
+            "Core",
+            &["path:src/a.rs", "path:src/shared.rs"],
+        )];
+        let old = make_plan("aaa", "bbb", old_units, old_slices);
+
+        let new_units = vec![
+            make_unit("path:src/a.rs", "core"),
+            make_unit("path:src/shared.rs", "shared"),
+        ];
+        let new_slices = vec![
+            make_slice("behavior-core", "Core", &["path:src/a.rs"]),
+            make_slice("behavior-auth", "Auth", &["path:src/shared.rs"]),
+        ];
+        let new = make_plan("aaa", "bbb", new_units, new_slices);
+
+        let cmp = compare_plans(&old, &new);
+        let rendered = render_comparison(&cmp);
+
+        assert!(rendered.contains("# stackcut plan comparison"));
+        assert!(rendered.contains("fingerprint:"));
+        assert!(rendered.contains("equivalence:"));
+        assert!(rendered.contains("## slices added"));
+        assert!(rendered.contains("`behavior-auth`"));
+        assert!(rendered.contains("## slices removed"));
+        assert!(rendered.contains("## slices modified"));
+        assert!(rendered.contains("## units moved"));
+    }
+
+    // ── scaffold_overrides tests ───────────────────────────────────────
+
+    fn minimal_plan_for_scaffold() -> Plan {
+        Plan {
+            version: "0.1.0".to_string(),
+            source: PlanSource {
+                repo_root: None,
+                base: "aaa".to_string(),
+                head: "bbb".to_string(),
+                head_tree: None,
+            },
+            units: vec![EditUnit {
+                id: "path:src/main.rs".to_string(),
+                path: "src/main.rs".to_string(),
+                old_path: None,
+                status: ChangeStatus::Modified,
+                kind: UnitKind::Behavior,
+                family: "cli".to_string(),
+                notes: Vec::new(),
+            }],
+            slices: vec![Slice {
+                id: "behavior-cli".to_string(),
+                title: "Behavior: cli".to_string(),
+                kind: SliceKind::Behavior,
+                families: vec!["cli".to_string()],
+                members: vec!["path:src/main.rs".to_string()],
+                depends_on: Vec::new(),
+                reasons: Vec::new(),
+                proof_surface: ProofSurface::default(),
+            }],
+            ambiguities: Vec::new(),
+            diagnostics: Vec::new(),
+            fingerprint: None,
+        }
+    }
+
+    #[test]
+    fn scaffold_no_ambiguities_produces_minimal_toml() {
+        let plan = minimal_plan_for_scaffold();
+        let output = scaffold_overrides(&plan);
+
+        // Must start with version = 1
+        assert!(
+            output.contains("version = 1"),
+            "scaffold output missing version = 1"
+        );
+
+        // With no ambiguities, no force_members section
+        assert!(
+            !output.contains("Ambiguity resolutions"),
+            "scaffold should not have ambiguity section when there are none"
+        );
+
+        // The uncommented lines should form valid TOML (just the version line)
+        let uncommented: String = output
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed: toml::Value =
+            toml::from_str(&uncommented).expect("uncommented scaffold output should be valid TOML");
+        assert_eq!(parsed.get("version").and_then(|v| v.as_integer()), Some(1));
+    }
+
+    #[test]
+    fn scaffold_with_ambiguities_includes_force_members() {
+        let mut plan = minimal_plan_for_scaffold();
+
+        // Add a second slice so ambiguity candidates make sense
+        plan.slices.push(Slice {
+            id: "behavior-git".to_string(),
+            title: "Behavior: git".to_string(),
+            kind: SliceKind::Behavior,
+            families: vec!["git".to_string()],
+            members: vec!["path:src/git.rs".to_string()],
+            depends_on: Vec::new(),
+            reasons: Vec::new(),
+            proof_surface: ProofSurface::default(),
+        });
+
+        plan.ambiguities.push(Ambiguity {
+            id: "ambig-readme".to_string(),
+            message: "README.md changed with multiple behavior families".to_string(),
+            affected_units: vec![
+                "path:README.md".to_string(),
+                "path:CHANGELOG.md".to_string(),
+            ],
+            candidate_slices: vec!["behavior-cli".to_string(), "behavior-git".to_string()],
+            resolution: "Assign to one slice via force_members".to_string(),
+        });
+
+        let output = scaffold_overrides(&plan);
+
+        // Must start with version = 1
+        assert!(
+            output.contains("version = 1"),
+            "scaffold output missing version = 1"
+        );
+
+        // Must mention the ambiguity
+        assert!(
+            output.contains("README.md changed with multiple behavior families"),
+            "scaffold output missing ambiguity message"
+        );
+
+        // Must include force_members for each affected unit
+        assert!(
+            output.contains("path:README.md"),
+            "scaffold output missing affected unit README.md"
+        );
+        assert!(
+            output.contains("path:CHANGELOG.md"),
+            "scaffold output missing affected unit CHANGELOG.md"
+        );
+
+        // Must list candidate slices
+        assert!(
+            output.contains("behavior-cli"),
+            "scaffold output missing candidate slice behavior-cli"
+        );
+        assert!(
+            output.contains("behavior-git"),
+            "scaffold output missing candidate slice behavior-git"
+        );
+
+        // With 2+ affected units, should include must_link
+        assert!(
+            output.contains("must_link"),
+            "scaffold output missing must_link for multi-unit ambiguity"
+        );
+    }
+
+    #[test]
+    fn escape_toml_value_handles_special_chars() {
+        assert_eq!(escape_toml_value("plain"), "plain");
+        assert_eq!(escape_toml_value(r#"has"quote"#), r#"has\"quote"#);
+        assert_eq!(escape_toml_value(r"has\backslash"), r"has\\backslash");
+        assert_eq!(escape_toml_value(r#"both\"chars"#), r#"both\\\"chars"#);
+    }
+
+    #[test]
+    fn scaffold_escapes_special_chars_in_ids() {
+        let mut plan = minimal_plan_for_scaffold();
+        plan.slices[0].id = r#"slice-with"quote"#.to_string();
+        plan.slices[0].title = r#"Title with "quotes" and \backslash"#.to_string();
+
+        let output = scaffold_overrides(&plan);
+
+        assert!(
+            output.contains(r#"# id = "slice-with\"quote""#),
+            "scaffold output should escape quotes in slice id: {}",
+            output
+        );
+        assert!(
+            output.contains(r#"# title = "Title with \"quotes\" and \\backslash""#),
+            "scaffold output should escape quotes and backslashes in title: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn scaffold_output_always_starts_with_version() {
+        // Plan with no ambiguities
+        let plan = minimal_plan_for_scaffold();
+        let output = scaffold_overrides(&plan);
+        let first_non_comment = output
+            .lines()
+            .find(|l| !l.starts_with('#') && !l.is_empty())
+            .expect("output should have non-comment lines");
+        assert_eq!(
+            first_non_comment, "version = 1",
+            "first non-comment line should be version = 1"
+        );
     }
 
     // ── Receipt tests ──────────────────────────────────────────────────
