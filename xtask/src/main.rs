@@ -1,5 +1,7 @@
 use anyhow::{bail, Context, Result};
+use std::collections::BTreeMap;
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -39,6 +41,7 @@ fn main() -> Result<()> {
             eprintln!("fuzz: no fuzz targets defined yet, skipping");
             Ok(())
         }
+        "scenario-index" => generate_scenario_index(),
         "docs-check" => docs_check(),
         "release-check" => run_sequence(&[
             &["fmt", "--all", "--check"],
@@ -60,6 +63,7 @@ fn main() -> Result<()> {
             eprintln!("  golden");
             eprintln!("  mutants");
             eprintln!("  fuzz");
+            eprintln!("  scenario-index");
             eprintln!("  docs-check");
             eprintln!("  release-check");
             Ok(())
@@ -83,6 +87,235 @@ fn run_cargo(args: &[&str]) -> Result<()> {
     if !status.success() {
         bail!("cargo {} failed", args.join(" "));
     }
+    Ok(())
+}
+
+/// Scan `fixtures/cases/` and generate `docs/SCENARIO_INDEX.md`.
+fn generate_scenario_index() -> Result<()> {
+    let cases_dir = Path::new("fixtures/cases");
+    if !cases_dir.is_dir() {
+        bail!("fixtures/cases/ directory not found");
+    }
+
+    let mut entries: Vec<_> = fs::read_dir(cases_dir)
+        .context("failed to read fixtures/cases/")?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+
+    struct CaseInfo {
+        dir_name: String,
+        display_name: String,
+        num: usize,
+        unit_count: usize,
+        slice_count: usize,
+        ambiguity_count: usize,
+        families: Vec<String>,
+        unit_kinds: BTreeMap<String, usize>,
+        slices: Vec<SliceInfo>,
+    }
+
+    struct SliceInfo {
+        id: String,
+        kind: String,
+        member_count: usize,
+        depends_on: Vec<String>,
+    }
+
+    let mut cases = Vec::new();
+
+    for (i, entry) in entries.iter().enumerate() {
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        let dir_path = entry.path();
+
+        let units_path = dir_path.join("input.units.json");
+        let plan_path = dir_path.join("expected.plan.json");
+
+        let units_text = fs::read_to_string(&units_path)
+            .with_context(|| format!("failed to read {}", units_path.display()))?;
+        let plan_text = fs::read_to_string(&plan_path)
+            .with_context(|| format!("failed to read {}", plan_path.display()))?;
+
+        let units: Vec<serde_json::Value> =
+            serde_json::from_str(&units_text).context("failed to parse input.units.json")?;
+        let plan: serde_json::Value =
+            serde_json::from_str(&plan_text).context("failed to parse expected.plan.json")?;
+
+        // Extract unit kinds
+        let mut unit_kinds: BTreeMap<String, usize> = BTreeMap::new();
+        let mut families_set = std::collections::BTreeSet::new();
+        for unit in &units {
+            if let Some(kind) = unit.get("kind").and_then(|v| v.as_str()) {
+                *unit_kinds.entry(kind.to_string()).or_insert(0) += 1;
+            }
+            if let Some(family) = unit.get("family").and_then(|v| v.as_str()) {
+                families_set.insert(family.to_string());
+            }
+        }
+
+        // Extract slices — require the field to be present
+        let slices_arr = plan
+            .get("slices")
+            .and_then(|v| v.as_array())
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected.plan.json in '{}' is missing a 'slices' array",
+                    dir_name
+                )
+            });
+
+        let mut slices = Vec::new();
+        for slice in slices_arr {
+            let id = slice
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let kind = slice
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let members = slice
+                .get("members")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let depends_on: Vec<String> = slice
+                .get("depends_on")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            slices.push(SliceInfo {
+                id,
+                kind,
+                member_count: members,
+                depends_on,
+            });
+        }
+
+        // Extract ambiguity count
+        let ambiguity_count = plan
+            .get("ambiguities")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+
+        // Display name: strip the numeric prefix
+        let display_name = dir_name
+            .strip_prefix(&format!("{:02}-", i + 1))
+            .unwrap_or(&dir_name)
+            .to_string();
+
+        cases.push(CaseInfo {
+            dir_name,
+            display_name,
+            num: i + 1,
+            unit_count: units.len(),
+            slice_count: slices_arr.len(),
+            ambiguity_count,
+            families: families_set.into_iter().collect(),
+            unit_kinds,
+            slices,
+        });
+    }
+
+    // Build the Markdown output
+    let mut md = String::new();
+
+    writeln!(md, "# Scenario Index").unwrap();
+    writeln!(md).unwrap();
+    writeln!(
+        md,
+        "> Auto-generated by `cargo xtask scenario-index`. Do not edit manually."
+    )
+    .unwrap();
+    writeln!(md).unwrap();
+
+    // Summary table
+    writeln!(md, "## Summary").unwrap();
+    writeln!(md).unwrap();
+    writeln!(md, "| # | Case | Units | Slices | Ambiguities | Families |").unwrap();
+    writeln!(md, "|---|------|-------|--------|-------------|----------|").unwrap();
+    for case in &cases {
+        writeln!(
+            md,
+            "| {} | {} | {} | {} | {} | {} |",
+            case.num,
+            case.display_name,
+            case.unit_count,
+            case.slice_count,
+            case.ambiguity_count,
+            case.families.join(", "),
+        )
+        .unwrap();
+    }
+
+    // Detail sections
+    for case in &cases {
+        writeln!(md).unwrap();
+        writeln!(md, "---").unwrap();
+        writeln!(md).unwrap();
+        writeln!(md, "## {}", case.dir_name).unwrap();
+        writeln!(md).unwrap();
+        writeln!(
+            md,
+            "**Units:** {} | **Slices:** {} | **Ambiguities:** {}",
+            case.unit_count, case.slice_count, case.ambiguity_count,
+        )
+        .unwrap();
+        writeln!(md).unwrap();
+
+        // Unit kinds
+        writeln!(md, "### Unit kinds").unwrap();
+        for (kind, count) in &case.unit_kinds {
+            writeln!(md, "- {kind}: {count}").unwrap();
+        }
+        writeln!(md).unwrap();
+
+        // Slices table
+        writeln!(md, "### Slices").unwrap();
+        writeln!(md, "| Slice | Kind | Members | Depends on |").unwrap();
+        writeln!(md, "|-------|------|---------|------------|").unwrap();
+        for slice in &case.slices {
+            let deps = if slice.depends_on.is_empty() {
+                "\u{2014}".to_string()
+            } else {
+                slice.depends_on.join(", ")
+            };
+            writeln!(
+                md,
+                "| {} | {} | {} | {} |",
+                slice.id, slice.kind, slice.member_count, deps,
+            )
+            .unwrap();
+        }
+        writeln!(md).unwrap();
+
+        // Families
+        writeln!(md, "### Families").unwrap();
+        for family in &case.families {
+            writeln!(md, "- {family}").unwrap();
+        }
+    }
+
+    let output_path = Path::new("docs/SCENARIO_INDEX.md");
+    fs::create_dir_all(output_path.parent().unwrap())
+        .context("failed to create docs/ directory")?;
+    fs::write(output_path, &md)
+        .with_context(|| format!("failed to write {}", output_path.display()))?;
+
+    println!(
+        "scenario-index: generated {} ({} cases)",
+        output_path.display(),
+        cases.len()
+    );
     Ok(())
 }
 
