@@ -319,7 +319,6 @@ fn generate_scenario_index() -> Result<()> {
     Ok(())
 }
 
-
 /// Check that file path references in documentation files actually exist.
 fn docs_check() -> Result<()> {
     let doc_files = &[
