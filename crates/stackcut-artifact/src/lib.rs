@@ -633,6 +633,94 @@ pub fn render_comparison(comparison: &PlanComparison) -> String {
     out
 }
 
+pub fn render_sarif(plan: &Plan) -> serde_json::Value {
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    let mut results = Vec::new();
+
+    // Map each Diagnostic to a SARIF result
+    for diag in &plan.diagnostics {
+        let level = match diag.level {
+            DiagnosticLevel::Error => "error",
+            DiagnosticLevel::Warning => "warning",
+            DiagnosticLevel::Note => "note",
+        };
+        results.push(json!({
+            "ruleId": format!("stackcut/{}", diag.code),
+            "level": level,
+            "message": { "text": diag.message },
+            "locations": []
+        }));
+    }
+
+    // Map each Ambiguity to a SARIF result
+    for ambiguity in &plan.ambiguities {
+        let message = if ambiguity.affected_units.is_empty() {
+            ambiguity.message.clone()
+        } else {
+            format!(
+                "{} (affected units: {})",
+                ambiguity.message,
+                ambiguity.affected_units.join(", ")
+            )
+        };
+
+        let locations: Vec<serde_json::Value> = ambiguity
+            .affected_units
+            .iter()
+            .map(|unit| {
+                let uri = unit.strip_prefix("path:").unwrap_or(unit);
+                json!({
+                    "physicalLocation": {
+                        "artifactLocation": { "uri": uri }
+                    }
+                })
+            })
+            .collect();
+
+        results.push(json!({
+            "ruleId": "stackcut/ambiguity",
+            "level": "warning",
+            "message": { "text": message },
+            "locations": locations
+        }));
+    }
+
+    // Collect unique rule IDs and build rules array
+    let mut rules_map: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    for result in &results {
+        let rule_id = result["ruleId"].as_str().unwrap().to_string();
+        let level = result["level"].as_str().unwrap().to_string();
+        rules_map.entry(rule_id.clone()).or_insert_with(|| {
+            json!({
+                "id": rule_id,
+                "shortDescription": { "text": rule_id },
+                "defaultConfiguration": { "level": level }
+            })
+        });
+    }
+    let rules: Vec<serde_json::Value> = rules_map.into_values().collect();
+
+    json!({
+        "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "stackcut",
+                        "version": "0.1.0",
+                        "informationUri": "https://github.com/EffortlessMetrics/stackcut",
+                        "rules": rules
+                    }
+                },
+                "results": results
+            }
+        ]
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2018,5 +2106,159 @@ mod tests {
             Some(RecompositionStatus::Skipped) => {}
             other => panic!("expected Skipped variant, got {:?}", other),
         }
+    }
+
+    // ── SARIF rendering tests ──────────────────────────────────────────
+
+    fn empty_plan() -> Plan {
+        Plan {
+            version: "0.1.0".to_string(),
+            source: PlanSource {
+                repo_root: None,
+                base: "aaa".to_string(),
+                head: "bbb".to_string(),
+                head_tree: None,
+            },
+            units: Vec::new(),
+            slices: Vec::new(),
+            ambiguities: Vec::new(),
+            diagnostics: Vec::new(),
+            fingerprint: None,
+            override_fingerprint: None,
+        }
+    }
+
+    #[test]
+    fn sarif_has_correct_schema_and_version() {
+        let plan = empty_plan();
+        let sarif = render_sarif(&plan);
+
+        assert_eq!(
+            sarif["$schema"],
+            "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json"
+        );
+        assert_eq!(sarif["version"], "2.1.0");
+        assert!(sarif["runs"].is_array());
+        assert_eq!(sarif["runs"].as_array().unwrap().len(), 1);
+
+        let run = &sarif["runs"][0];
+        assert_eq!(run["tool"]["driver"]["name"], "stackcut");
+        assert_eq!(run["tool"]["driver"]["version"], "0.1.0");
+        assert_eq!(
+            run["tool"]["driver"]["informationUri"],
+            "https://github.com/EffortlessMetrics/stackcut"
+        );
+    }
+
+    #[test]
+    fn sarif_empty_plan_produces_valid_output_with_no_results() {
+        let plan = empty_plan();
+        let sarif = render_sarif(&plan);
+
+        let results = sarif["runs"][0]["results"].as_array().unwrap();
+        assert!(results.is_empty());
+
+        let rules = sarif["runs"][0]["tool"]["driver"]["rules"]
+            .as_array()
+            .unwrap();
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn sarif_diagnostics_mapped_to_results() {
+        let mut plan = empty_plan();
+        plan.diagnostics = vec![
+            Diagnostic {
+                level: DiagnosticLevel::Error,
+                code: "missing-member".to_string(),
+                message: "Unit not assigned to any slice".to_string(),
+            },
+            Diagnostic {
+                level: DiagnosticLevel::Warning,
+                code: "review-budget-exceeded".to_string(),
+                message: "Slice 'behavior-core' has 20 members (budget: 15)".to_string(),
+            },
+            Diagnostic {
+                level: DiagnosticLevel::Note,
+                code: "info".to_string(),
+                message: "All good".to_string(),
+            },
+        ];
+
+        let sarif = render_sarif(&plan);
+        let results = sarif["runs"][0]["results"].as_array().unwrap();
+        assert_eq!(results.len(), 3);
+
+        // Check level mapping
+        assert_eq!(results[0]["ruleId"], "stackcut/missing-member");
+        assert_eq!(results[0]["level"], "error");
+        assert_eq!(
+            results[0]["message"]["text"],
+            "Unit not assigned to any slice"
+        );
+
+        assert_eq!(results[1]["ruleId"], "stackcut/review-budget-exceeded");
+        assert_eq!(results[1]["level"], "warning");
+
+        assert_eq!(results[2]["ruleId"], "stackcut/info");
+        assert_eq!(results[2]["level"], "note");
+
+        // Check that locations are empty arrays for diagnostics
+        for result in results {
+            assert!(result["locations"].as_array().unwrap().is_empty());
+        }
+
+        // Check rules are populated
+        let rules = sarif["runs"][0]["tool"]["driver"]["rules"]
+            .as_array()
+            .unwrap();
+        assert_eq!(rules.len(), 3);
+    }
+
+    #[test]
+    fn sarif_ambiguities_appear_as_results_with_locations() {
+        let mut plan = empty_plan();
+        plan.ambiguities = vec![Ambiguity {
+            id: "ambig-1".to_string(),
+            message: "Unit belongs to multiple families".to_string(),
+            affected_units: vec![
+                "path:src/core/planner.rs".to_string(),
+                "path:src/core/types.rs".to_string(),
+            ],
+            candidate_slices: vec!["behavior-core".to_string(), "behavior-api".to_string()],
+            resolution: "manual".to_string(),
+        }];
+
+        let sarif = render_sarif(&plan);
+        let results = sarif["runs"][0]["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+
+        let result = &results[0];
+        assert_eq!(result["ruleId"], "stackcut/ambiguity");
+        assert_eq!(result["level"], "warning");
+
+        // Message should include affected units
+        let msg = result["message"]["text"].as_str().unwrap();
+        assert!(msg.contains("src/core/planner.rs"));
+        assert!(msg.contains("src/core/types.rs"));
+
+        // Locations should have entries for affected units with path: prefix stripped
+        let locations = result["locations"].as_array().unwrap();
+        assert_eq!(locations.len(), 2);
+        assert_eq!(
+            locations[0]["physicalLocation"]["artifactLocation"]["uri"],
+            "src/core/planner.rs"
+        );
+        assert_eq!(
+            locations[1]["physicalLocation"]["artifactLocation"]["uri"],
+            "src/core/types.rs"
+        );
+
+        // Rules should include the ambiguity rule
+        let rules = sarif["runs"][0]["tool"]["driver"]["rules"]
+            .as_array()
+            .unwrap();
+        let rule_ids: Vec<&str> = rules.iter().map(|r| r["id"].as_str().unwrap()).collect();
+        assert!(rule_ids.contains(&"stackcut/ambiguity"));
     }
 }
