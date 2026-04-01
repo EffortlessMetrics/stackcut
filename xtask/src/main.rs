@@ -34,7 +34,11 @@ fn main() -> Result<()> {
         ]),
         "smoke" => run_sequence(&[&["test", "--workspace"]]),
         "golden" => run_sequence(&[&["test", "-p", "stackcut-artifact"]]),
-        "mutants" => run_external("cargo-mutants", &["--workspace", "--timeout", "300"]),
+        "mutants" => run_cargo(&["mutants", "--workspace", "--timeout", "300"]),
+        "fuzz" => {
+            eprintln!("fuzz: no fuzz targets defined yet, skipping");
+            Ok(())
+        }
         "docs-check" => docs_check(),
         "release-check" => run_sequence(&[
             &["fmt", "--all", "--check"],
@@ -55,6 +59,7 @@ fn main() -> Result<()> {
             eprintln!("  smoke");
             eprintln!("  golden");
             eprintln!("  mutants");
+            eprintln!("  fuzz");
             eprintln!("  docs-check");
             eprintln!("  release-check");
             Ok(())
@@ -77,18 +82,6 @@ fn run_cargo(args: &[&str]) -> Result<()> {
 
     if !status.success() {
         bail!("cargo {} failed", args.join(" "));
-    }
-    Ok(())
-}
-
-fn run_external(program: &str, args: &[&str]) -> Result<()> {
-    let status = Command::new(program)
-        .args(args)
-        .status()
-        .with_context(|| format!("failed to run {} {}", program, args.join(" ")))?;
-
-    if !status.success() {
-        bail!("{} {} failed", program, args.join(" "));
     }
     Ok(())
 }
