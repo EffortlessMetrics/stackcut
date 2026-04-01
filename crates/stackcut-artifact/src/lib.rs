@@ -309,6 +309,157 @@ pub fn write_summary(path: &Path, plan: &Plan) -> Result<()> {
     Ok(())
 }
 
+pub fn render_slice_explanation(plan: &Plan, slice_id: &str) -> Option<String> {
+    let slice = plan.slices.iter().find(|s| s.id == slice_id)?;
+
+    let mut output = String::new();
+
+    // Header
+    output.push_str(&format!("# Why: `{}` — {}\n\n", slice.id, slice.title));
+
+    // Identity
+    output.push_str("## Identity\n");
+    output.push_str(&format!("- **Kind:** {:?}\n", slice.kind));
+    output.push_str(&format!(
+        "- **Families:** {}\n",
+        if slice.families.is_empty() {
+            "(none)".to_string()
+        } else {
+            slice.families.join(", ")
+        }
+    ));
+    output.push_str(&format!("- **Members:** {} files\n\n", slice.members.len()));
+
+    // Members table
+    output.push_str("## Members\n\n");
+    output.push_str("| Status | Kind | Path |\n");
+    output.push_str("|--------|------|------|\n");
+    for member_id in &slice.members {
+        if let Some(unit) = plan.units.iter().find(|u| u.id == *member_id) {
+            output.push_str(&format!(
+                "| {} | {} | `{}` |\n",
+                format_change_status(&unit.status),
+                format_unit_kind(&unit.kind),
+                unit.path
+            ));
+        } else {
+            output.push_str(&format!("| ? | ? | `{}` |\n", member_id));
+        }
+    }
+    output.push('\n');
+
+    // Reasons
+    output.push_str("## Why these files are together\n\n");
+    if slice.reasons.is_empty() {
+        output.push_str("(no reasons recorded)\n");
+    } else {
+        for reason in &slice.reasons {
+            output.push_str(&format!("- `{}`: {}\n", reason.code, reason.message));
+        }
+    }
+    output.push('\n');
+
+    // Dependencies
+    output.push_str("## Dependencies\n\n");
+    if slice.depends_on.is_empty() {
+        output.push_str("This slice has no dependencies.\n\n");
+    } else {
+        output.push_str("This slice depends on:\n");
+        for dep_id in &slice.depends_on {
+            if let Some(dep_slice) = plan.slices.iter().find(|s| s.id == *dep_id) {
+                output.push_str(&format!("- `{}` — {}\n", dep_id, dep_slice.title));
+            } else {
+                output.push_str(&format!("- `{}`\n", dep_id));
+            }
+        }
+        output.push('\n');
+    }
+
+    // Reverse dependencies
+    let reverse_deps: Vec<&stackcut_core::Slice> = plan
+        .slices
+        .iter()
+        .filter(|s| s.depends_on.contains(&slice.id.to_string()))
+        .collect();
+    if reverse_deps.is_empty() {
+        output.push_str("No slices depend on this one.\n\n");
+    } else {
+        output.push_str("These slices depend on this one:\n");
+        for rev in &reverse_deps {
+            output.push_str(&format!("- `{}` — {}\n", rev.id, rev.title));
+        }
+        output.push('\n');
+    }
+
+    // Ambiguities
+    output.push_str("## Ambiguities\n\n");
+    let affecting_ambiguities: Vec<&stackcut_core::Ambiguity> = plan
+        .ambiguities
+        .iter()
+        .filter(|a| a.candidate_slices.contains(&slice.id.to_string()))
+        .collect();
+    if affecting_ambiguities.is_empty() {
+        output.push_str("No ambiguities affect this slice.\n\n");
+    } else {
+        for amb in &affecting_ambiguities {
+            output.push_str(&format!("- `{}`: {}\n", amb.id, amb.message));
+        }
+        output.push('\n');
+    }
+
+    // Proof surface
+    output.push_str("## Proof surface\n");
+    output.push_str(&format!(
+        "- Scenarios: {}\n",
+        if slice.proof_surface.scenario_ids.is_empty() {
+            "(none)".to_string()
+        } else {
+            slice.proof_surface.scenario_ids.join(", ")
+        }
+    ));
+    output.push_str(&format!(
+        "- Expected commands: {}\n\n",
+        if slice.proof_surface.expected_commands.is_empty() {
+            "(none)".to_string()
+        } else {
+            slice.proof_surface.expected_commands.join(", ")
+        }
+    ));
+
+    // Override hints
+    output.push_str("## What an override could change\n");
+    output.push_str("- `force_members` can move individual files to/from this slice\n");
+    output.push_str("- `must_link` can force additional files to stay with this slice\n");
+    output.push_str("- `rename_slices` can change this slice's display title\n");
+    output.push_str("- `must_order` can enforce ordering relative to other slices\n");
+
+    Some(output)
+}
+
+fn format_change_status(status: &stackcut_core::ChangeStatus) -> &'static str {
+    match status {
+        stackcut_core::ChangeStatus::Added => "added",
+        stackcut_core::ChangeStatus::Modified => "modified",
+        stackcut_core::ChangeStatus::Deleted => "deleted",
+        stackcut_core::ChangeStatus::Renamed => "renamed",
+        stackcut_core::ChangeStatus::Copied => "copied",
+        stackcut_core::ChangeStatus::Unknown => "unknown",
+    }
+}
+
+fn format_unit_kind(kind: &stackcut_core::UnitKind) -> &'static str {
+    match kind {
+        stackcut_core::UnitKind::Manifest => "manifest",
+        stackcut_core::UnitKind::Lockfile => "lockfile",
+        stackcut_core::UnitKind::Generated => "generated",
+        stackcut_core::UnitKind::Test => "test",
+        stackcut_core::UnitKind::Documentation => "documentation",
+        stackcut_core::UnitKind::OpsConfig => "ops-config",
+        stackcut_core::UnitKind::Mechanical => "mechanical",
+        stackcut_core::UnitKind::Behavior => "behavior",
+    }
+}
+
 pub fn render_summary(plan: &Plan) -> String {
     let mut output = String::new();
 
@@ -1636,6 +1787,110 @@ mod tests {
         }
     }
 
+    // ── Tests for render_slice_explanation ──────────────────────────────
+
+    fn test_plan_with_deps() -> Plan {
+        let units = vec![
+            EditUnit {
+                id: "path:src/core/planner.rs".to_string(),
+                path: "src/core/planner.rs".to_string(),
+                old_path: None,
+                status: ChangeStatus::Modified,
+                kind: UnitKind::Behavior,
+                family: "core".to_string(),
+                notes: Vec::new(),
+            },
+            EditUnit {
+                id: "path:src/core/config.rs".to_string(),
+                path: "src/core/config.rs".to_string(),
+                old_path: None,
+                status: ChangeStatus::Modified,
+                kind: UnitKind::Behavior,
+                family: "core".to_string(),
+                notes: Vec::new(),
+            },
+            EditUnit {
+                id: "path:tests/planner_scenarios.rs".to_string(),
+                path: "tests/planner_scenarios.rs".to_string(),
+                old_path: None,
+                status: ChangeStatus::Modified,
+                kind: UnitKind::Test,
+                family: "core".to_string(),
+                notes: Vec::new(),
+            },
+            EditUnit {
+                id: "path:Cargo.toml".to_string(),
+                path: "Cargo.toml".to_string(),
+                old_path: None,
+                status: ChangeStatus::Modified,
+                kind: UnitKind::Manifest,
+                family: "workspace".to_string(),
+                notes: Vec::new(),
+            },
+        ];
+        Plan {
+            version: "0.1.0".to_string(),
+            source: PlanSource {
+                repo_root: None,
+                base: "base".to_string(),
+                head: "head".to_string(),
+                head_tree: None,
+            },
+            units,
+            slices: vec![
+                Slice {
+                    id: "behavior-core".to_string(),
+                    title: "Behavior: core".to_string(),
+                    kind: SliceKind::Behavior,
+                    families: vec!["core".to_string()],
+                    members: vec![
+                        "path:src/core/planner.rs".to_string(),
+                        "path:src/core/config.rs".to_string(),
+                        "path:tests/planner_scenarios.rs".to_string(),
+                    ],
+                    depends_on: vec!["api-schema-workspace".to_string()],
+                    reasons: vec![
+                        InclusionReason {
+                            code: "family-grouping".to_string(),
+                            message: "Behavioral edits group by inferred path family.".to_string(),
+                        },
+                        InclusionReason {
+                            code: "must-link-override".to_string(),
+                            message: "Keep planner changes with their validating tests."
+                                .to_string(),
+                        },
+                    ],
+                    proof_surface: ProofSurface::default(),
+                    fingerprint: None,
+                },
+                Slice {
+                    id: "api-schema-workspace".to_string(),
+                    title: "Manifest and lockstep package metadata".to_string(),
+                    kind: SliceKind::ApiSchema,
+                    families: vec!["workspace".to_string()],
+                    members: vec!["path:Cargo.toml".to_string()],
+                    depends_on: Vec::new(),
+                    reasons: Vec::new(),
+                    proof_surface: ProofSurface::default(),
+                    fingerprint: None,
+                },
+            ],
+            ambiguities: vec![Ambiguity {
+                id: "amb-1".to_string(),
+                message: "File could belong to either slice.".to_string(),
+                affected_units: vec!["path:src/core/config.rs".to_string()],
+                candidate_slices: vec![
+                    "behavior-core".to_string(),
+                    "api-schema-workspace".to_string(),
+                ],
+                resolution: "assigned to behavior-core".to_string(),
+            }],
+            diagnostics: Vec::new(),
+            fingerprint: None,
+            override_fingerprint: None,
+        }
+    }
+
     #[test]
     fn scaffold_no_ambiguities_produces_minimal_toml() {
         let plan = minimal_plan_for_scaffold();
@@ -1730,6 +1985,43 @@ mod tests {
         assert!(
             output.contains("must_link"),
             "scaffold output missing must_link for multi-unit ambiguity"
+        );
+    }
+
+    #[test]
+    fn explanation_contains_slice_id_and_title() {
+        let plan = test_plan_with_deps();
+        let result = render_slice_explanation(&plan, "behavior-core");
+        assert!(result.is_some());
+        let text = result.unwrap();
+        assert!(text.contains("behavior-core"), "missing slice ID");
+        assert!(text.contains("Behavior: core"), "missing slice title");
+    }
+
+    #[test]
+    fn explanation_lists_all_members() {
+        let plan = test_plan_with_deps();
+        let text = render_slice_explanation(&plan, "behavior-core").unwrap();
+        assert!(
+            text.contains("src/core/planner.rs"),
+            "missing member planner.rs"
+        );
+        assert!(
+            text.contains("src/core/config.rs"),
+            "missing member config.rs"
+        );
+        assert!(
+            text.contains("tests/planner_scenarios.rs"),
+            "missing member planner_scenarios.rs"
+        );
+        // Verify the members table has correct statuses and kinds
+        assert!(
+            text.contains("| modified | behavior |"),
+            "missing status/kind for behavior file"
+        );
+        assert!(
+            text.contains("| modified | test |"),
+            "missing status/kind for test file"
         );
     }
 
@@ -2151,6 +2443,32 @@ mod tests {
     }
 
     #[test]
+    fn explanation_shows_dependencies_and_reverse_deps() {
+        let plan = test_plan_with_deps();
+        let text = render_slice_explanation(&plan, "behavior-core").unwrap();
+        // Forward dependency
+        assert!(
+            text.contains("api-schema-workspace"),
+            "missing forward dependency"
+        );
+        assert!(
+            text.contains("Manifest and lockstep package metadata"),
+            "missing dependency title"
+        );
+
+        // Check reverse dependency from the other side
+        let text2 = render_slice_explanation(&plan, "api-schema-workspace").unwrap();
+        assert!(
+            text2.contains("behavior-core"),
+            "missing reverse dependency"
+        );
+        assert!(
+            text2.contains("These slices depend on this one"),
+            "missing reverse dep heading"
+        );
+    }
+
+    #[test]
     fn sarif_empty_plan_produces_valid_output_with_no_results() {
         let plan = empty_plan();
         let sarif = render_sarif(&plan);
@@ -2260,5 +2578,23 @@ mod tests {
             .unwrap();
         let rule_ids: Vec<&str> = rules.iter().map(|r| r["id"].as_str().unwrap()).collect();
         assert!(rule_ids.contains(&"stackcut/ambiguity"));
+    }
+
+    #[test]
+    fn explanation_shows_ambiguities() {
+        let plan = test_plan_with_deps();
+        let text = render_slice_explanation(&plan, "behavior-core").unwrap();
+        assert!(text.contains("amb-1"), "missing ambiguity ID");
+        assert!(
+            text.contains("File could belong to either slice"),
+            "missing ambiguity message"
+        );
+    }
+
+    #[test]
+    fn explanation_returns_none_for_unknown_slice() {
+        let plan = test_plan_with_deps();
+        let result = render_slice_explanation(&plan, "nonexistent-slice");
+        assert!(result.is_none());
     }
 }
