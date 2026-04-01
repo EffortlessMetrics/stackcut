@@ -2,10 +2,10 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde::de::DeserializeOwned;
 use stackcut_artifact::{
-    compare_plans, compute_fingerprint, read_plan, render_comparison, render_sarif, render_summary,
-    scaffold_overrides, write_diagnostics_envelope, write_plan, write_receipt, write_summary,
-    FingerprintCheck, RecompositionReceipt, RecompositionStatus, RecompositionVerdict, SliceHash,
-    StructuralResult, ValidationResult,
+    compare_plans, compute_fingerprint, read_plan, render_comparison, render_sarif,
+    render_slice_explanation, render_summary, scaffold_overrides, write_diagnostics_envelope,
+    write_plan, write_receipt, write_summary, FingerprintCheck, RecompositionReceipt,
+    RecompositionStatus, RecompositionVerdict, SliceHash, StructuralResult, ValidationResult,
 };
 use stackcut_core::{
     parse_config, plan as build_plan, structural_validate, DiagnosticLevel, Overrides,
@@ -67,7 +67,12 @@ enum Commands {
         dry_run: bool,
     },
     /// Render a stored plan as readable Markdown.
-    Explain { plan: PathBuf },
+    Explain {
+        plan: PathBuf,
+        /// Show detailed explanation for a specific slice.
+        #[arg(long)]
+        why: Option<String>,
+    },
     /// Validate a stored plan.
     Validate {
         plan: PathBuf,
@@ -165,7 +170,7 @@ fn run() -> Result<i32> {
             overrides.as_deref(),
             dry_run,
         ),
-        Commands::Explain { plan } => cmd_explain(&plan),
+        Commands::Explain { plan, why } => cmd_explain(&plan, why.as_deref()),
         Commands::Validate {
             plan,
             exact,
@@ -249,10 +254,24 @@ fn cmd_plan(
     Ok(ExitCode::Success as i32)
 }
 
-fn cmd_explain(plan_path: &Path) -> Result<i32> {
+fn cmd_explain(plan_path: &Path, why: Option<&str>) -> Result<i32> {
     let plan = read_plan(plan_path)?;
-    print!("{}", render_summary(&plan));
-    Ok(ExitCode::Success as i32)
+    match why {
+        Some(slice_id) => match render_slice_explanation(&plan, slice_id) {
+            Some(explanation) => {
+                print!("{}", explanation);
+                Ok(ExitCode::Success as i32)
+            }
+            None => {
+                eprintln!("slice '{}' not found in plan", slice_id);
+                Ok(ExitCode::StructuralError as i32)
+            }
+        },
+        None => {
+            print!("{}", render_summary(&plan));
+            Ok(ExitCode::Success as i32)
+        }
+    }
 }
 
 fn cmd_validate(
@@ -1270,6 +1289,7 @@ mod tests {
                         help.contains("<PLAN>") || help.contains("plan"),
                         "explain help missing plan argument"
                     );
+                    assert!(help.contains("--why"), "explain help missing --why flag");
                 }
                 "validate" => {
                     assert!(help.contains("--exact"), "validate help missing --exact");
@@ -1552,6 +1572,70 @@ mod tests {
         assert!(
             help.contains("Print plan JSON to stdout without writing files"),
             "plan help missing --dry-run description"
+        );
+    }
+
+    #[test]
+    fn explain_why_flag_parses_correctly() {
+        use clap::CommandFactory;
+        // Verify --why is an optional argument on the explain subcommand
+        let cmd = Cli::command();
+        let explain_sub = cmd
+            .get_subcommands()
+            .find(|s| s.get_name() == "explain")
+            .expect("explain subcommand not found");
+        let why_arg = explain_sub
+            .get_arguments()
+            .find(|a| a.get_id() == "why")
+            .expect("--why argument not found on explain");
+        assert!(!why_arg.is_required_set(), "--why should be optional");
+    }
+
+    #[test]
+    fn cmd_explain_why_returns_error_for_unknown_slice() {
+        let plan = minimal_plan(PLAN_VERSION);
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.json");
+        let json = serde_json::to_string_pretty(&plan).unwrap();
+        std::fs::write(&plan_path, format!("{json}\n")).unwrap();
+
+        let result = cmd_explain(&plan_path, Some("nonexistent")).unwrap();
+        assert_eq!(
+            result,
+            ExitCode::StructuralError as i32,
+            "Expected StructuralError for unknown slice"
+        );
+    }
+
+    #[test]
+    fn cmd_explain_why_succeeds_for_known_slice() {
+        let plan = minimal_plan(PLAN_VERSION);
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.json");
+        let json = serde_json::to_string_pretty(&plan).unwrap();
+        std::fs::write(&plan_path, format!("{json}\n")).unwrap();
+
+        let result = cmd_explain(&plan_path, Some("behavior-cli")).unwrap();
+        assert_eq!(
+            result,
+            ExitCode::Success as i32,
+            "Expected Success for known slice"
+        );
+    }
+
+    #[test]
+    fn cmd_explain_without_why_uses_summary() {
+        let plan = minimal_plan(PLAN_VERSION);
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.json");
+        let json = serde_json::to_string_pretty(&plan).unwrap();
+        std::fs::write(&plan_path, format!("{json}\n")).unwrap();
+
+        let result = cmd_explain(&plan_path, None).unwrap();
+        assert_eq!(
+            result,
+            ExitCode::Success as i32,
+            "Expected Success for summary mode"
         );
     }
 
