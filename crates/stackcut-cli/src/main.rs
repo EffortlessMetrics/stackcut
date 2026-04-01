@@ -7,7 +7,7 @@ use stackcut_artifact::{
 };
 use stackcut_core::{
     parse_config, plan as build_plan, structural_validate, DiagnosticLevel, Overrides,
-    StackcutConfig,
+    PathFamilyRule, StackcutConfig,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -71,6 +71,15 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Initialize stackcut in a repository.
+    Init {
+        /// Repository path.
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Overwrite existing stackcut.toml.
+        #[arg(long)]
+        force: bool,
+    },
     /// Generate an override.toml scaffold from a plan's ambiguities.
     ScaffoldOverrides {
         /// Path to the plan.json to scaffold from.
@@ -121,6 +130,7 @@ fn run() -> Result<i32> {
             out_dir,
             dry_run,
         } => cmd_materialize(&plan, &out_dir, dry_run),
+        Commands::Init { repo, force } => cmd_init(&repo, force),
         Commands::ScaffoldOverrides {
             plan,
             output,
@@ -262,6 +272,223 @@ fn cmd_materialize(plan_path: &Path, out_dir: &Path, dry_run: bool) -> Result<i3
         println!("{}", path.display());
     }
     Ok(ExitCode::Success as i32)
+}
+
+fn cmd_init(repo: &Path, force: bool) -> Result<i32> {
+    let repo_root = stackcut_git::discover_repo_root(repo)
+        .with_context(|| format!("failed to discover git repo from {}", repo.display()))?;
+
+    let config_path = repo_root.join("stackcut.toml");
+    if config_path.exists() && !force {
+        eprintln!("stackcut.toml already exists (use --force to overwrite)");
+        return Ok(ExitCode::StructuralError as i32);
+    }
+
+    let config = generate_initial_config(&repo_root);
+    let toml_content = render_config_toml(&config);
+
+    fs::write(&config_path, &toml_content)
+        .with_context(|| format!("failed to write {}", config_path.display()))?;
+    println!("wrote {}", config_path.display());
+
+    let stackcut_dir = repo_root.join(".stackcut");
+    if !stackcut_dir.exists() {
+        fs::create_dir_all(&stackcut_dir)
+            .with_context(|| format!("failed to create {}", stackcut_dir.display()))?;
+        println!("created {}", stackcut_dir.display());
+    }
+
+    Ok(ExitCode::Success as i32)
+}
+
+fn generate_initial_config(repo_root: &Path) -> StackcutConfig {
+    // Only check the repository root for manifests and lock files.  Nested
+    // manifests (e.g. workspace member Cargo.toml files) are intentionally
+    // excluded because the planner already groups them via path_families.
+    let manifest_candidates = [
+        "Cargo.toml",
+        "package.json",
+        "pyproject.toml",
+        "go.mod",
+        "pom.xml",
+        "build.gradle",
+    ];
+    let manifest_files: Vec<String> = manifest_candidates
+        .iter()
+        .filter(|f| repo_root.join(f).exists())
+        .map(|f| f.to_string())
+        .collect();
+
+    let lock_candidates = [
+        "Cargo.lock",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "poetry.lock",
+        "go.sum",
+    ];
+    let lock_files: Vec<String> = lock_candidates
+        .iter()
+        .filter(|f| repo_root.join(f).exists())
+        .map(|f| f.to_string())
+        .collect();
+
+    let mut path_families: Vec<PathFamilyRule> = Vec::new();
+    for dir_name in &["src", "crates", "packages"] {
+        let dir = repo_root.join(dir_name);
+        if let Ok(entries) = fs::read_dir(&dir) {
+            let mut subdirs: Vec<String> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect();
+            subdirs.sort();
+            for name in subdirs {
+                path_families.push(PathFamilyRule {
+                    prefix: format!("{}/{}/", dir_name, name),
+                    family: name,
+                });
+            }
+        }
+    }
+
+    let test_candidates = ["tests/", "test/", "specs/", "spec/", "__tests__/"];
+    let mut test_prefixes: Vec<String> = test_candidates
+        .iter()
+        .filter(|d| repo_root.join(d).is_dir())
+        .map(|d| d.to_string())
+        .collect();
+    if test_prefixes.is_empty() {
+        test_prefixes.push("tests/".to_string());
+    }
+
+    let doc_candidates = ["docs/", "doc/", "adr/"];
+    let doc_prefixes: Vec<String> = doc_candidates
+        .iter()
+        .filter(|d| repo_root.join(d).is_dir())
+        .map(|d| d.to_string())
+        .collect();
+
+    let ops_candidates = [".github/", "ci/", ".circleci/", ".gitlab-ci/"];
+    let ops_prefixes: Vec<String> = ops_candidates
+        .iter()
+        .filter(|d| repo_root.join(d).is_dir())
+        .map(|d| d.to_string())
+        .collect();
+
+    let generated_candidates = ["dist/", "build/", "generated/", "fixtures/generated/"];
+    let mut generated_prefixes: Vec<String> = generated_candidates
+        .iter()
+        .filter(|d| repo_root.join(d).is_dir())
+        .map(|d| d.to_string())
+        .collect();
+    if generated_prefixes.is_empty() {
+        generated_prefixes.push("generated/".to_string());
+    }
+
+    StackcutConfig {
+        version: 1,
+        generated_prefixes,
+        manifest_files,
+        lock_files,
+        test_prefixes,
+        doc_prefixes,
+        ops_prefixes,
+        path_families,
+        review_budget: None,
+    }
+}
+
+fn render_config_toml(config: &StackcutConfig) -> String {
+    let mut out = String::new();
+
+    out.push_str("# stackcut configuration\n");
+    out.push_str("# See https://github.com/stackcut/stackcut for documentation\n");
+    out.push_str(&format!("version = {}\n", config.version));
+
+    out.push('\n');
+    out.push_str("# Files treated as generated output (mechanical, not reviewed individually)\n");
+    out.push_str(&format!(
+        "generated_prefixes = {}\n",
+        format_string_array(&config.generated_prefixes)
+    ));
+
+    out.push('\n');
+    out.push_str("# Package manifest files (grouped with lock files in the same slice)\n");
+    out.push_str(&format!(
+        "manifest_files = {}\n",
+        format_string_array(&config.manifest_files)
+    ));
+
+    out.push('\n');
+    out.push_str("# Lock files (always move with their manifest)\n");
+    out.push_str(&format!(
+        "lock_files = {}\n",
+        format_string_array(&config.lock_files)
+    ));
+
+    out.push('\n');
+    out.push_str("# Directories containing tests\n");
+    out.push_str(&format!(
+        "test_prefixes = {}\n",
+        format_string_array(&config.test_prefixes)
+    ));
+
+    out.push('\n');
+    out.push_str("# Directories containing documentation\n");
+    out.push_str(&format!(
+        "doc_prefixes = {}\n",
+        format_string_array(&config.doc_prefixes)
+    ));
+
+    out.push('\n');
+    out.push_str("# Directories containing CI/ops configuration\n");
+    out.push_str(&format!(
+        "ops_prefixes = {}\n",
+        format_string_array(&config.ops_prefixes)
+    ));
+
+    if !config.path_families.is_empty() {
+        out.push('\n');
+        out.push_str("# Path-to-family mappings for the planner\n");
+        out.push_str("# The planner groups files by family; files under the same prefix\n");
+        out.push_str("# are assumed to belong together.\n");
+        for rule in &config.path_families {
+            out.push_str(&format!(
+                "\n[[path_families]]\nprefix = \"{}\"\nfamily = \"{}\"\n",
+                escape_toml_string(&rule.prefix),
+                escape_toml_string(&rule.family)
+            ));
+        }
+    }
+
+    out.push('\n');
+    out.push_str("# Optional: maximum files per slice before a review-budget warning fires\n");
+    match config.review_budget {
+        Some(budget) => out.push_str(&format!("review_budget = {}\n", budget)),
+        None => out.push_str("# review_budget = 15\n"),
+    }
+
+    out
+}
+
+/// Escape a string for embedding in a TOML quoted value.
+///
+/// Handles backslashes and double-quotes so the rendered TOML stays valid even
+/// if a path prefix or family name contains those characters.
+fn escape_toml_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn format_string_array(items: &[String]) -> String {
+    if items.is_empty() {
+        return "[]".to_string();
+    }
+    let inner: Vec<String> = items
+        .iter()
+        .map(|s| format!("\"{}\"", escape_toml_string(s)))
+        .collect();
+    format!("[{}]", inner.join(", "))
 }
 
 fn cmd_scaffold_overrides(plan_path: &Path, output: &Path, force: bool) -> Result<i32> {
@@ -511,6 +738,187 @@ mod tests {
                 result
             );
         }
+    }
+
+    // ── Init command tests ─────────────────────────────────────────────
+
+    #[test]
+    fn init_subcommand_exists() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let names: Vec<&str> = cmd.get_subcommands().map(|s| s.get_name()).collect();
+        assert!(names.contains(&"init"), "CLI missing 'init' subcommand");
+    }
+
+    #[test]
+    fn init_has_repo_and_force_args() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let init_cmd = cmd
+            .get_subcommands()
+            .find(|s| s.get_name() == "init")
+            .expect("init subcommand not found");
+        let arg_names: Vec<&str> = init_cmd
+            .get_arguments()
+            .map(|a| a.get_id().as_str())
+            .collect();
+        assert!(arg_names.contains(&"repo"), "init missing --repo arg");
+        assert!(arg_names.contains(&"force"), "init missing --force arg");
+    }
+
+    #[test]
+    fn generate_initial_config_detects_repo_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Create known files and dirs
+        fs::write(root.join("Cargo.toml"), "[package]").unwrap();
+        fs::create_dir_all(root.join("src/core")).unwrap();
+        fs::create_dir_all(root.join("src/git")).unwrap();
+        fs::create_dir_all(root.join("tests")).unwrap();
+        fs::create_dir_all(root.join(".github")).unwrap();
+
+        let config = generate_initial_config(root);
+
+        assert_eq!(config.version, 1);
+        assert!(config.manifest_files.contains(&"Cargo.toml".to_string()));
+        assert!(!config.manifest_files.contains(&"package.json".to_string()));
+
+        assert!(config.test_prefixes.contains(&"tests/".to_string()));
+        assert!(config.ops_prefixes.contains(&".github/".to_string()));
+
+        // Should detect src/core/ and src/git/ as path families
+        let family_names: Vec<&str> = config
+            .path_families
+            .iter()
+            .map(|r| r.family.as_str())
+            .collect();
+        assert!(family_names.contains(&"core"), "missing core family");
+        assert!(family_names.contains(&"git"), "missing git family");
+
+        let prefixes: Vec<&str> = config
+            .path_families
+            .iter()
+            .map(|r| r.prefix.as_str())
+            .collect();
+        assert!(prefixes.contains(&"src/core/"), "missing src/core/ prefix");
+        assert!(prefixes.contains(&"src/git/"), "missing src/git/ prefix");
+    }
+
+    #[test]
+    fn generate_initial_config_fallback_defaults() {
+        // Empty directory: should get fallback defaults for tests and generated
+        let dir = tempfile::tempdir().unwrap();
+        let config = generate_initial_config(dir.path());
+
+        assert!(
+            config.test_prefixes.contains(&"tests/".to_string()),
+            "should have tests/ fallback"
+        );
+        assert!(
+            config
+                .generated_prefixes
+                .contains(&"generated/".to_string()),
+            "should have generated/ fallback"
+        );
+        assert!(config.manifest_files.is_empty());
+        assert!(config.lock_files.is_empty());
+        assert!(config.path_families.is_empty());
+    }
+
+    #[test]
+    fn render_config_toml_produces_valid_parseable_toml() {
+        let config = StackcutConfig {
+            version: 1,
+            generated_prefixes: vec!["dist/".to_string(), "generated/".to_string()],
+            manifest_files: vec!["Cargo.toml".to_string()],
+            lock_files: vec!["Cargo.lock".to_string()],
+            test_prefixes: vec!["tests/".to_string()],
+            doc_prefixes: vec!["docs/".to_string()],
+            ops_prefixes: vec![".github/".to_string()],
+            path_families: vec![
+                PathFamilyRule {
+                    prefix: "src/core/".to_string(),
+                    family: "core".to_string(),
+                },
+                PathFamilyRule {
+                    prefix: "src/git/".to_string(),
+                    family: "git".to_string(),
+                },
+            ],
+            review_budget: None,
+        };
+
+        let toml_str = render_config_toml(&config);
+
+        // Should contain comments
+        assert!(toml_str.contains("# stackcut configuration"));
+        assert!(toml_str.contains("# review_budget = 15"));
+
+        // Should parse back to a valid StackcutConfig
+        let parsed: StackcutConfig = toml::from_str(&toml_str).expect("rendered TOML should parse");
+        assert_eq!(parsed.version, config.version);
+        assert_eq!(parsed.generated_prefixes, config.generated_prefixes);
+        assert_eq!(parsed.manifest_files, config.manifest_files);
+        assert_eq!(parsed.lock_files, config.lock_files);
+        assert_eq!(parsed.test_prefixes, config.test_prefixes);
+        assert_eq!(parsed.doc_prefixes, config.doc_prefixes);
+        assert_eq!(parsed.ops_prefixes, config.ops_prefixes);
+        assert_eq!(parsed.path_families, config.path_families);
+        assert_eq!(parsed.review_budget, config.review_budget);
+    }
+
+    #[test]
+    fn render_config_toml_empty_arrays() {
+        let config = StackcutConfig {
+            version: 1,
+            generated_prefixes: vec![],
+            manifest_files: vec![],
+            lock_files: vec![],
+            test_prefixes: vec![],
+            doc_prefixes: vec![],
+            ops_prefixes: vec![],
+            path_families: vec![],
+            review_budget: None,
+        };
+
+        let toml_str = render_config_toml(&config);
+        let parsed: StackcutConfig = toml::from_str(&toml_str).expect("rendered TOML should parse");
+        assert_eq!(parsed.version, 1);
+        assert!(parsed.path_families.is_empty());
+    }
+
+    #[test]
+    fn escape_toml_string_handles_special_chars() {
+        assert_eq!(escape_toml_string("plain"), "plain");
+        assert_eq!(escape_toml_string(r#"has"quote"#), r#"has\"quote"#);
+        assert_eq!(escape_toml_string(r"back\slash"), r"back\\slash");
+        assert_eq!(escape_toml_string(r#"both\"chars"#), r#"both\\\"chars"#);
+    }
+
+    #[test]
+    fn render_config_toml_special_chars_roundtrip() {
+        let config = StackcutConfig {
+            version: 1,
+            generated_prefixes: vec![],
+            manifest_files: vec![r#"path with "quotes".toml"#.to_string()],
+            lock_files: vec![],
+            test_prefixes: vec![r"back\slash/".to_string()],
+            doc_prefixes: vec![],
+            ops_prefixes: vec![],
+            path_families: vec![PathFamilyRule {
+                prefix: r#"src/weird"dir/"#.to_string(),
+                family: r#"weird"name"#.to_string(),
+            }],
+            review_budget: None,
+        };
+
+        let toml_str = render_config_toml(&config);
+        let parsed: StackcutConfig =
+            toml::from_str(&toml_str).expect("rendered TOML with special chars should parse");
+        assert_eq!(parsed.manifest_files, config.manifest_files);
+        assert_eq!(parsed.test_prefixes, config.test_prefixes);
+        assert_eq!(parsed.path_families, config.path_families);
     }
 
     // ── scaffold-overrides tests ───────────────────────────────────────
