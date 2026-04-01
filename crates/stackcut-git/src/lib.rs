@@ -1,4 +1,5 @@
 use anyhow::{anyhow, bail, Context, Result};
+use sha2::{Digest, Sha256};
 use stackcut_core::{
     classify_path, infer_family, ChangeStatus, EditUnit, Plan, PlanSource, Slice, StackcutConfig,
 };
@@ -7,6 +8,18 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::tempdir;
+
+pub struct RecompositionResult {
+    pub slice_results: Vec<SliceApplyResult>,
+    pub recomposed_tree: String,
+}
+
+pub struct SliceApplyResult {
+    pub slice_id: String,
+    pub patch_sha256: String,
+    pub apply_ok: bool,
+    pub error: Option<String>,
+}
 
 pub fn discover_repo_root(start: &Path) -> Result<PathBuf> {
     let stdout = run_git_capture(Some(start), &["rev-parse", "--show-toplevel"])?;
@@ -199,15 +212,41 @@ fn rollback_written(written: &[PathBuf]) {
 }
 
 pub fn validate_exact_recomposition(repo: &Path, plan: &Plan) -> Result<()> {
+    let result = validate_exact_recomposition_with_receipt(repo, plan)?;
+    let expected_tree = plan.source.head_tree.as_ref().ok_or_else(|| {
+        anyhow!("plan is missing source.head_tree; exact validation is unavailable")
+    })?;
+
+    // Check if any slice failed to apply
+    for sr in &result.slice_results {
+        if !sr.apply_ok {
+            bail!(
+                "exact recomposition failed: slice '{}' failed to apply: {}",
+                sr.slice_id,
+                sr.error.as_deref().unwrap_or("unknown error")
+            );
+        }
+    }
+
+    if result.recomposed_tree != *expected_tree {
+        bail!(
+            "exact recomposition failed: expected tree {} but got {}",
+            expected_tree,
+            result.recomposed_tree
+        );
+    }
+
+    Ok(())
+}
+
+pub fn validate_exact_recomposition_with_receipt(
+    repo: &Path,
+    plan: &Plan,
+) -> Result<RecompositionResult> {
     let repo_root = discover_repo_root(repo)?;
-    let expected_tree = plan
-        .source
-        .head_tree
-        .as_ref()
-        .ok_or_else(|| {
-            anyhow!("plan is missing source.head_tree; exact validation is unavailable")
-        })?
-        .clone();
+    plan.source.head_tree.as_ref().ok_or_else(|| {
+        anyhow!("plan is missing source.head_tree; exact validation is unavailable")
+    })?;
 
     let patch_dir = tempdir().context("failed to create temporary patch directory")?;
     let patch_paths = materialize_patches(&repo_root, plan, patch_dir.path(), false)?;
@@ -229,24 +268,49 @@ pub fn validate_exact_recomposition(repo: &Path, plan: &Plan) -> Result<()> {
         &["checkout", "--quiet", &plan.source.base],
     )?;
 
-    for patch in &patch_paths {
+    let mut slice_results = Vec::new();
+    for (i, patch) in patch_paths.iter().enumerate() {
+        let patch_bytes =
+            fs::read(patch).with_context(|| format!("failed to read patch {}", patch.display()))?;
+        let hash = Sha256::digest(&patch_bytes);
+        let patch_sha256 = format!("{:x}", hash);
+
+        let slice_id = plan
+            .slices
+            .get(i)
+            .map(|s| s.id.clone())
+            .unwrap_or_else(|| format!("unknown-{}", i));
+
         let patch_value = patch.display().to_string();
-        run_git_capture(Some(&clone_repo), &["apply", "--check", &patch_value])
-            .with_context(|| format!("patch {} does not apply cleanly", patch.display()))?;
-        run_git_capture(Some(&clone_repo), &["apply", "--index", &patch_value])
-            .with_context(|| format!("failed to apply patch {}", patch.display()))?;
+        let apply_result = run_git_capture(Some(&clone_repo), &["apply", "--index", &patch_value]);
+
+        match apply_result {
+            Ok(_) => {
+                slice_results.push(SliceApplyResult {
+                    slice_id,
+                    patch_sha256,
+                    apply_ok: true,
+                    error: None,
+                });
+            }
+            Err(e) => {
+                slice_results.push(SliceApplyResult {
+                    slice_id,
+                    patch_sha256,
+                    apply_ok: false,
+                    error: Some(format!("{e}")),
+                });
+            }
+        }
     }
 
-    let actual_tree = run_git_capture(Some(&clone_repo), &["write-tree"])?;
-    if actual_tree != expected_tree {
-        bail!(
-            "exact recomposition failed: expected tree {} but got {}",
-            expected_tree,
-            actual_tree
-        );
-    }
+    let recomposed_tree = run_git_capture(Some(&clone_repo), &["write-tree"])
+        .unwrap_or_else(|_| "unknown".to_string());
 
-    Ok(())
+    Ok(RecompositionResult {
+        slice_results,
+        recomposed_tree,
+    })
 }
 
 fn patch_bytes_for_slice(repo: &Path, plan: &Plan, slice: &Slice) -> Result<Vec<u8>> {

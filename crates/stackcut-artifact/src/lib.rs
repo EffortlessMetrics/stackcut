@@ -6,6 +6,47 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecompositionReceipt {
+    pub version: String,
+    pub base: String,
+    pub head: String,
+    pub head_tree: String,
+    pub plan_fingerprint: String,
+    pub slice_hashes: Vec<SliceHash>,
+    pub recomposed_tree: String,
+    pub verdict: RecompositionVerdict,
+    pub generated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SliceHash {
+    pub slice_id: String,
+    pub patch_sha256: String,
+    pub apply_status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecompositionVerdict {
+    Pass,
+    Fail,
+}
+
+pub fn write_receipt(path: &Path, receipt: &RecompositionReceipt) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let file =
+        fs::File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+    let mut writer = std::io::BufWriter::new(file);
+    serde_json::to_writer_pretty(&mut writer, receipt).context("failed to serialize receipt")?;
+    std::io::Write::write_all(&mut writer, b"\n")
+        .with_context(|| format!("failed to write trailing newline to {}", path.display()))?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticsEnvelope {
     pub source_base: String,
@@ -1599,6 +1640,161 @@ mod tests {
         assert_eq!(
             first_non_comment, "version = 1",
             "first non-comment line should be version = 1"
+        );
+    }
+
+    // ── Receipt tests ──────────────────────────────────────────────────
+
+    fn arb_verdict() -> impl Strategy<Value = RecompositionVerdict> {
+        prop_oneof![
+            Just(RecompositionVerdict::Pass),
+            Just(RecompositionVerdict::Fail),
+        ]
+    }
+
+    fn arb_slice_hash() -> impl Strategy<Value = SliceHash> {
+        (
+            "[a-z-]{3,12}",
+            "[a-f0-9]{64}",
+            prop_oneof![Just("ok".to_string()), "[a-z ]{3,20}"],
+        )
+            .prop_map(|(slice_id, patch_sha256, apply_status)| SliceHash {
+                slice_id,
+                patch_sha256,
+                apply_status,
+            })
+    }
+
+    fn arb_receipt() -> impl Strategy<Value = RecompositionReceipt> {
+        (
+            "[a-f0-9]{40}",
+            "[a-f0-9]{40}",
+            "[a-f0-9]{40}",
+            "[a-f0-9]{64}",
+            proptest::collection::vec(arb_slice_hash(), 1..=5),
+            "[a-f0-9]{40}",
+            arb_verdict(),
+        )
+            .prop_map(
+                |(
+                    base,
+                    head,
+                    head_tree,
+                    plan_fingerprint,
+                    slice_hashes,
+                    recomposed_tree,
+                    verdict,
+                )| {
+                    RecompositionReceipt {
+                        version: "0.1.0".to_string(),
+                        base,
+                        head,
+                        head_tree,
+                        plan_fingerprint,
+                        slice_hashes,
+                        recomposed_tree,
+                        verdict,
+                        generated_at: chrono::Utc::now().to_rfc3339(),
+                    }
+                },
+            )
+    }
+
+    // Receipt JSON round-trip (proptest)
+    proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(100))]
+
+        #[test]
+        fn receipt_json_round_trip(receipt in arb_receipt()) {
+            let json = serde_json::to_string_pretty(&receipt).unwrap();
+            let deserialized: RecompositionReceipt = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(receipt, deserialized);
+        }
+    }
+
+    #[test]
+    fn receipt_serialization_stability() {
+        let receipt = RecompositionReceipt {
+            version: "0.1.0".to_string(),
+            base: "abc123".to_string(),
+            head: "def456".to_string(),
+            head_tree: "tree789".to_string(),
+            plan_fingerprint: "fp000".to_string(),
+            slice_hashes: vec![SliceHash {
+                slice_id: "behavior-core".to_string(),
+                patch_sha256: "deadbeef".to_string(),
+                apply_status: "ok".to_string(),
+            }],
+            recomposed_tree: "tree789".to_string(),
+            verdict: RecompositionVerdict::Pass,
+            generated_at: "2025-01-01T00:00:00+00:00".to_string(),
+        };
+
+        let json1 = serde_json::to_string_pretty(&receipt).unwrap();
+        let json2 = serde_json::to_string_pretty(&receipt).unwrap();
+        assert_eq!(json1, json2, "receipt serialization is not stable");
+
+        // Verify expected field names and values appear in JSON
+        assert!(json1.contains("\"version\""));
+        assert!(json1.contains("\"base\""));
+        assert!(json1.contains("\"head\""));
+        assert!(json1.contains("\"head_tree\""));
+        assert!(json1.contains("\"plan_fingerprint\""));
+        assert!(json1.contains("\"slice_hashes\""));
+        assert!(json1.contains("\"recomposed_tree\""));
+        assert!(json1.contains("\"verdict\""));
+        assert!(json1.contains("\"generated_at\""));
+        assert!(
+            json1.contains("\"pass\""),
+            "verdict should serialize as kebab-case"
+        );
+    }
+
+    #[test]
+    fn receipt_write_and_read_back() {
+        let receipt = RecompositionReceipt {
+            version: "0.1.0".to_string(),
+            base: "abc123".to_string(),
+            head: "def456".to_string(),
+            head_tree: "tree789".to_string(),
+            plan_fingerprint: "fp000".to_string(),
+            slice_hashes: vec![],
+            recomposed_tree: "tree789".to_string(),
+            verdict: RecompositionVerdict::Pass,
+            generated_at: "2025-01-01T00:00:00+00:00".to_string(),
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("receipt.json");
+        write_receipt(&path, &receipt).unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let parsed: RecompositionReceipt = serde_json::from_str(&contents).unwrap();
+        assert_eq!(receipt, parsed);
+    }
+
+    #[test]
+    fn receipt_verdict_fail_serializes_correctly() {
+        let receipt = RecompositionReceipt {
+            version: "0.1.0".to_string(),
+            base: "a".to_string(),
+            head: "b".to_string(),
+            head_tree: "t".to_string(),
+            plan_fingerprint: "f".to_string(),
+            slice_hashes: vec![SliceHash {
+                slice_id: "s1".to_string(),
+                patch_sha256: "hash".to_string(),
+                apply_status: "patch failed to apply".to_string(),
+            }],
+            recomposed_tree: "wrong".to_string(),
+            verdict: RecompositionVerdict::Fail,
+            generated_at: "2025-01-01T00:00:00+00:00".to_string(),
+        };
+
+        let json = serde_json::to_string_pretty(&receipt).unwrap();
+        assert!(
+            json.contains("\"fail\""),
+            "fail verdict should serialize as kebab-case"
         );
     }
 }

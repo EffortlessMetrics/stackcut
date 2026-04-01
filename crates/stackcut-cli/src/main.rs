@@ -3,7 +3,8 @@ use clap::{Parser, Subcommand};
 use serde::de::DeserializeOwned;
 use stackcut_artifact::{
     compare_plans, compute_fingerprint, read_plan, render_comparison, render_summary,
-    scaffold_overrides, write_diagnostics_envelope, write_plan, write_summary,
+    scaffold_overrides, write_diagnostics_envelope, write_plan, write_receipt, write_summary,
+    RecompositionReceipt, RecompositionVerdict, SliceHash,
 };
 use stackcut_core::{
     parse_config, plan as build_plan, structural_validate, DiagnosticLevel, Overrides,
@@ -62,6 +63,8 @@ enum Commands {
         plan: PathBuf,
         #[arg(long)]
         exact: bool,
+        #[arg(long)]
+        receipt: Option<PathBuf>,
     },
     /// Materialize a stored plan into a patch series.
     Materialize {
@@ -140,7 +143,11 @@ fn run() -> Result<i32> {
             overrides.as_deref(),
         ),
         Commands::Explain { plan } => cmd_explain(&plan),
-        Commands::Validate { plan, exact } => cmd_validate(&plan, exact),
+        Commands::Validate {
+            plan,
+            exact,
+            receipt,
+        } => cmd_validate(&plan, exact, receipt.as_deref()),
         Commands::Materialize {
             plan,
             out_dir,
@@ -213,7 +220,12 @@ fn cmd_explain(plan_path: &Path) -> Result<i32> {
     Ok(ExitCode::Success as i32)
 }
 
-fn cmd_validate(plan_path: &Path, exact: bool) -> Result<i32> {
+fn cmd_validate(plan_path: &Path, exact: bool, receipt_path: Option<&Path>) -> Result<i32> {
+    if receipt_path.is_some() && !exact {
+        eprintln!("error: --receipt requires --exact");
+        return Ok(ExitCode::StructuralError as i32);
+    }
+
     let plan = read_plan(plan_path)?;
 
     // Version check: reject plans with unsupported versions
@@ -265,16 +277,95 @@ fn cmd_validate(plan_path: &Path, exact: bool) -> Result<i32> {
             .as_ref()
             .map(PathBuf::from)
             .context("plan is missing source.repo_root; exact validation is unavailable")?;
-        match stackcut_git::validate_exact_recomposition(&repo_root, &plan) {
-            Ok(()) => println!("exact recomposition: ok"),
-            Err(e) => {
-                eprintln!("exact recomposition failed: {e}");
-                return Ok(ExitCode::RecompositionFailure as i32);
+
+        if let Some(rpath) = receipt_path {
+            let result =
+                match stackcut_git::validate_exact_recomposition_with_receipt(&repo_root, &plan) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let receipt = RecompositionReceipt {
+                            version: plan.version.clone(),
+                            base: plan.source.base.clone(),
+                            head: plan.source.head.clone(),
+                            head_tree: plan.source.head_tree.clone().unwrap_or_default(),
+                            plan_fingerprint: compute_fingerprint(&plan),
+                            slice_hashes: Vec::new(),
+                            recomposed_tree: String::new(),
+                            verdict: RecompositionVerdict::Fail,
+                            generated_at: chrono::Utc::now().to_rfc3339(),
+                        };
+                        write_receipt(rpath, &receipt)?;
+                        eprintln!("exact recomposition error: {e:#}");
+                        println!("receipt written to {}", rpath.display());
+                        return Ok(ExitCode::RecompositionFailure as i32);
+                    }
+                };
+
+            let expected_tree = plan.source.head_tree.clone().unwrap_or_default();
+
+            let all_ok = result.slice_results.iter().all(|sr| sr.apply_ok);
+            let trees_match = result.recomposed_tree == expected_tree;
+            let verdict = if all_ok && trees_match {
+                RecompositionVerdict::Pass
+            } else {
+                RecompositionVerdict::Fail
+            };
+
+            let receipt = RecompositionReceipt {
+                version: plan.version.clone(),
+                base: plan.source.base.clone(),
+                head: plan.source.head.clone(),
+                head_tree: expected_tree,
+                plan_fingerprint: compute_fingerprint(&plan),
+                slice_hashes: result
+                    .slice_results
+                    .iter()
+                    .map(|sr| SliceHash {
+                        slice_id: sr.slice_id.clone(),
+                        patch_sha256: sr.patch_sha256.clone(),
+                        apply_status: if sr.apply_ok {
+                            "ok".to_string()
+                        } else {
+                            sr.error
+                                .clone()
+                                .unwrap_or_else(|| "unknown error".to_string())
+                        },
+                    })
+                    .collect(),
+                recomposed_tree: result.recomposed_tree,
+                verdict: verdict.clone(),
+                generated_at: chrono::Utc::now().to_rfc3339(),
+            };
+
+            write_receipt(rpath, &receipt)?;
+
+            match verdict {
+                RecompositionVerdict::Pass => {
+                    println!("exact recomposition: pass");
+                    println!("receipt written to {}", rpath.display());
+                    Ok(ExitCode::Success as i32)
+                }
+                RecompositionVerdict::Fail => {
+                    eprintln!("exact recomposition: fail");
+                    println!("receipt written to {}", rpath.display());
+                    Ok(ExitCode::RecompositionFailure as i32)
+                }
+            }
+        } else {
+            match stackcut_git::validate_exact_recomposition(&repo_root, &plan) {
+                Ok(()) => {
+                    println!("exact recomposition: ok");
+                    Ok(ExitCode::Success as i32)
+                }
+                Err(e) => {
+                    eprintln!("exact recomposition failed: {e}");
+                    Ok(ExitCode::RecompositionFailure as i32)
+                }
             }
         }
+    } else {
+        Ok(ExitCode::Success as i32)
     }
-
-    Ok(ExitCode::Success as i32)
 }
 
 fn cmd_materialize(plan_path: &Path, out_dir: &Path, dry_run: bool) -> Result<i32> {
@@ -1038,6 +1129,10 @@ mod tests {
                 }
                 "validate" => {
                     assert!(help.contains("--exact"), "validate help missing --exact");
+                    assert!(
+                        help.contains("--receipt"),
+                        "validate help missing --receipt"
+                    );
                 }
                 "materialize" => {
                     assert!(
@@ -1293,7 +1388,7 @@ mod tests {
             let json = serde_json::to_string_pretty(&plan).unwrap();
             std::fs::write(&plan_path, format!("{json}\n")).unwrap();
 
-            let result = cmd_validate(&plan_path, false).unwrap();
+            let result = cmd_validate(&plan_path, false, None).unwrap();
             prop_assert_eq!(
                 result,
                 ExitCode::StructuralError as i32,
@@ -1608,5 +1703,50 @@ mod tests {
             contents.contains("version = 1"),
             "overwritten file should contain scaffold output"
         );
+    }
+
+    // ── receipt tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn receipt_without_exact_returns_structural_error() {
+        let plan = minimal_plan(PLAN_VERSION);
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.json");
+        let json = serde_json::to_string_pretty(&plan).unwrap();
+        std::fs::write(&plan_path, format!("{json}\n")).unwrap();
+
+        let receipt_path = dir.path().join("receipt.json");
+        let result = cmd_validate(&plan_path, false, Some(&receipt_path)).unwrap();
+        assert_eq!(
+            result,
+            ExitCode::StructuralError as i32,
+            "--receipt without --exact should return StructuralError"
+        );
+        // Receipt file should not be created
+        assert!(
+            !receipt_path.exists(),
+            "receipt file should not be created when --exact is missing"
+        );
+    }
+
+    #[test]
+    fn validate_help_contains_receipt_flag() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        for sub in cmd.get_subcommands() {
+            if sub.get_name() == "validate" {
+                let mut sub_clone = sub.clone();
+                let mut buf = Vec::new();
+                sub_clone.write_long_help(&mut buf).unwrap();
+                let help = String::from_utf8(buf).unwrap();
+                assert!(
+                    help.contains("--receipt"),
+                    "validate help missing --receipt flag"
+                );
+                return;
+            }
+        }
+        panic!("validate subcommand not found");
     }
 }
