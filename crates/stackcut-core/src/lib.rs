@@ -1650,7 +1650,7 @@ another_bad_key = 42
         ];
         let config = StackcutConfig {
             review_budget: Some(2), // budget of 2, slice has 3
-            ..Default::default()
+            ..StackcutConfig::default()
         };
 
         let result = plan(source, units, &config, &Overrides::default());
@@ -1721,7 +1721,7 @@ another_bad_key = 42
         ];
         let config = StackcutConfig {
             review_budget: Some(5),
-            ..Default::default()
+            ..StackcutConfig::default()
         };
 
         let result = plan(source, units, &config, &Overrides::default());
@@ -2812,7 +2812,7 @@ another_bad_key = 42
 
             let config = StackcutConfig {
                 review_budget: Some(budget),
-                ..Default::default()
+                ..StackcutConfig::default()
             };
 
             let result = plan(source, units, &config, &Overrides::default());
