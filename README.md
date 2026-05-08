@@ -1,5 +1,11 @@
 # stackcut
 
+[![CI](https://github.com/EffortlessMetrics/stackcut/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/EffortlessMetrics/stackcut/actions/workflows/ci.yml)
+[![Coverage](https://github.com/EffortlessMetrics/stackcut/actions/workflows/coverage.yml/badge.svg?branch=main)](https://github.com/EffortlessMetrics/stackcut/actions/workflows/coverage.yml)
+[![Codecov](https://codecov.io/gh/EffortlessMetrics/stackcut/branch/main/graph/badge.svg)](https://codecov.io/gh/EffortlessMetrics/stackcut)
+[![MSRV](https://img.shields.io/badge/MSRV-1.78-blue.svg)](Cargo.toml)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
+
 `stackcut` is a deterministic **diff-to-stack compiler**.
 
 It takes one oversized change, turns it into a reviewable stack, proves the stack covers the original change exactly at the selected granularity, and emits portable artifacts a human, CI job, or agent can trust.
@@ -13,6 +19,8 @@ This starter build is intentionally narrow:
 - emits a portable `plan.json`, `summary.md`, and `diagnostics.json`
 - materializes a patch series for each slice
 - validates structural invariants and, when possible, exact recomposition by applying the generated patches to the base revision and comparing the resulting tree to `head`
+
+Codecov is Rust execution-surface telemetry only; see [Coverage](docs/ci/coverage.md) for what the badge does and does not claim.
 
 ## What v0.1 does not do
 
