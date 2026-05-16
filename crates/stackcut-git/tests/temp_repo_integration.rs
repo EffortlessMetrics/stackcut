@@ -371,9 +371,7 @@ fn integration_materialize_dry_run() {
     );
 
     // The output directory must be empty — dry-run writes to an internal tempdir
-    let entries: Vec<_> = std::fs::read_dir(dry_run_out_dir.path())
-        .unwrap()
-        .collect();
+    let entries: Vec<_> = std::fs::read_dir(dry_run_out_dir.path()).unwrap().collect();
     assert!(
         entries.is_empty(),
         "dry-run must not write files to the provided output directory"
@@ -406,8 +404,8 @@ fn integration_type_change_produces_unknown_status() {
 
     let config = StackcutConfig::default();
 
-    let (_, units) = collect_edit_units(repo, &base, &head, &config)
-        .expect("collect_edit_units failed");
+    let (_, units) =
+        collect_edit_units(repo, &base, &head, &config).expect("collect_edit_units failed");
 
     // The type-changed file must produce an EditUnit with Unknown status and
     // the "unsupported-symlink" note.
@@ -422,7 +420,10 @@ fn integration_type_change_produces_unknown_status() {
         "type-change must produce Unknown status"
     );
     assert!(
-        type_changed.notes.iter().any(|n| n == "unsupported-symlink"),
+        type_changed
+            .notes
+            .iter()
+            .any(|n| n == "unsupported-symlink"),
         "type-change must carry 'unsupported-symlink' note, got: {:?}",
         type_changed.notes
     );
