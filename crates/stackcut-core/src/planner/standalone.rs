@@ -47,6 +47,29 @@ pub(super) fn build_standalone_slices(
     slices
 }
 
+pub(super) fn build_misc_unassigned(
+    units: &[EditUnit],
+    assigned: &BTreeSet<String>,
+) -> Option<(Slice, Vec<String>)> {
+    let unassigned_ids = collect_ids(units, assigned, |_| true);
+    if unassigned_ids.is_empty() {
+        return None;
+    }
+    let slice = new_slice(
+        "misc-unassigned",
+        "Misc: unassigned changes",
+        SliceKind::Misc,
+        family_list_for_members(units, &unassigned_ids),
+        unassigned_ids.clone(),
+        Vec::new(),
+        vec![reason(
+            "misc-catchall",
+            "Unassigned units collected into misc slice.",
+        )],
+    );
+    Some((slice, unassigned_ids))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -93,10 +116,7 @@ mod tests {
         );
 
         assert!(
-            slice
-                .reasons
-                .iter()
-                .any(|r| r.code == "misc-catchall"),
+            slice.reasons.iter().any(|r| r.code == "misc-catchall"),
             "slice must carry the 'misc-catchall' reason code; reasons: {:?}",
             slice.reasons
         );
@@ -114,29 +134,9 @@ mod tests {
         assigned.insert("unit-a".to_string());
 
         let result = build_misc_unassigned(&units, &assigned);
-        assert!(result.is_none(), "should return None when every unit is assigned");
+        assert!(
+            result.is_none(),
+            "should return None when every unit is assigned"
+        );
     }
-}
-
-pub(super) fn build_misc_unassigned(
-    units: &[EditUnit],
-    assigned: &BTreeSet<String>,
-) -> Option<(Slice, Vec<String>)> {
-    let unassigned_ids = collect_ids(units, assigned, |_| true);
-    if unassigned_ids.is_empty() {
-        return None;
-    }
-    let slice = new_slice(
-        "misc-unassigned",
-        "Misc: unassigned changes",
-        SliceKind::Misc,
-        family_list_for_members(units, &unassigned_ids),
-        unassigned_ids.clone(),
-        Vec::new(),
-        vec![reason(
-            "misc-catchall",
-            "Unassigned units collected into misc slice.",
-        )],
-    );
-    Some((slice, unassigned_ids))
 }
