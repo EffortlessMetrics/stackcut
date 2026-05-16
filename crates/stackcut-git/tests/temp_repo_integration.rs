@@ -9,8 +9,11 @@ use std::path::Path;
 use std::process::Command;
 use tempfile::tempdir;
 
-use stackcut_core::{plan, Overrides, StackcutConfig};
-use stackcut_git::{collect_edit_units, materialize_patches, validate_exact_recomposition};
+use stackcut_core::{plan, Overrides, PlanSource, StackcutConfig, PLAN_VERSION};
+use stackcut_git::{
+    collect_edit_units, materialize_patches, validate_exact_recomposition,
+    validate_exact_recomposition_with_receipt,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -36,6 +39,7 @@ fn init_repo(dir: &Path) {
     git(dir, &["init", "-b", "main"]);
     git(dir, &["config", "user.email", "test@test.com"]);
     git(dir, &["config", "user.name", "Test"]);
+    git(dir, &["config", "commit.gpgsign", "false"]);
 }
 
 fn write_file(repo: &Path, relative: &str, content: &str) {
@@ -254,6 +258,259 @@ fn integration_multi_family_split() {
     assert!(!patches.is_empty());
 
     validate_exact_recomposition(repo, &the_plan).expect("validate_exact_recomposition failed");
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: Simple Delete
+// ---------------------------------------------------------------------------
+
+#[test]
+fn integration_simple_delete() {
+    let tmp = tempdir().unwrap();
+    let repo = tmp.path();
+    init_repo(repo);
+
+    // Base commit: one file
+    write_file(repo, "src/core/to_delete.rs", "fn to_delete() {}\n");
+    commit_all(repo, "base");
+    let base = git(repo, &["rev-parse", "HEAD"]);
+
+    // Head commit: delete the file
+    git(repo, &["rm", "src/core/to_delete.rs"]);
+    commit_all(repo, "head");
+    let head = git(repo, &["rev-parse", "HEAD"]);
+
+    let config = StackcutConfig::default();
+    let overrides = stackcut_core::Overrides::default();
+
+    let (source, units) =
+        collect_edit_units(repo, &base, &head, &config).expect("collect_edit_units failed");
+
+    // Verify the deleted file produces a Deleted edit unit
+    assert!(!units.is_empty(), "expected at least one edit unit");
+    let deleted_unit = units
+        .iter()
+        .find(|u| u.path == "src/core/to_delete.rs")
+        .expect("expected a unit for the deleted file");
+    assert_eq!(
+        deleted_unit.status,
+        stackcut_core::ChangeStatus::Deleted,
+        "expected Deleted status for removed file"
+    );
+
+    // Run the full pipeline: plan → materialize → validate
+    let the_plan = plan(source, units, &config, &overrides);
+    let errors: Vec<_> = the_plan
+        .diagnostics
+        .iter()
+        .filter(|d| d.level == stackcut_core::DiagnosticLevel::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "plan has structural errors: {:?}",
+        errors
+    );
+
+    let patch_dir = tempdir().expect("failed to create patch temp dir");
+    let patches = materialize_patches(repo, &the_plan, patch_dir.path(), false)
+        .expect("materialize_patches failed");
+    assert!(!patches.is_empty(), "expected at least one patch");
+
+    validate_exact_recomposition(repo, &the_plan).expect("validate_exact_recomposition failed");
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: Materialize dry-run
+// ---------------------------------------------------------------------------
+
+#[test]
+fn integration_materialize_dry_run() {
+    let tmp = tempdir().unwrap();
+    let repo = tmp.path();
+    init_repo(repo);
+
+    // Base commit: one file
+    write_file(repo, "src/core/original.rs", "fn original() {}\n");
+    commit_all(repo, "base");
+    let base = git(repo, &["rev-parse", "HEAD"]);
+
+    // Head commit: modify the file
+    write_file(
+        repo,
+        "src/core/original.rs",
+        "fn original() { /* updated */ }\n",
+    );
+    commit_all(repo, "head");
+    let head = git(repo, &["rev-parse", "HEAD"]);
+
+    let config = StackcutConfig::default();
+    let overrides = stackcut_core::Overrides::default();
+
+    let (source, units) =
+        collect_edit_units(repo, &base, &head, &config).expect("collect_edit_units failed");
+    assert!(!units.is_empty(), "expected at least one edit unit");
+
+    let the_plan = plan(source, units, &config, &overrides);
+
+    // The dry-run path calls `git apply --check` against the working tree. For
+    // that check to succeed, the working tree must be at the BASE state so the
+    // patch (base→head) can be applied cleanly. Checkout the base commit first.
+    git(repo, &["checkout", &base]);
+
+    // Use a real output directory — in dry-run mode materialize_patches should
+    // NOT write anything to it (patches go to an internal tempdir).
+    let dry_run_out_dir = tempdir().expect("failed to create dry-run output dir");
+
+    let paths = materialize_patches(repo, &the_plan, dry_run_out_dir.path(), true)
+        .expect("materialize_patches dry-run failed");
+
+    // Must return at least one path
+    assert!(
+        !paths.is_empty(),
+        "expected at least one path returned from dry-run"
+    );
+
+    // The output directory must be empty — dry-run writes to an internal tempdir
+    let entries: Vec<_> = std::fs::read_dir(dry_run_out_dir.path())
+        .unwrap()
+        .collect();
+    assert!(
+        entries.is_empty(),
+        "dry-run must not write files to the provided output directory"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: Type-change (file → symlink) produces Unknown status with note
+// ---------------------------------------------------------------------------
+
+#[test]
+fn integration_type_change_produces_unknown_status() {
+    let tmp = tempdir().unwrap();
+    let repo = tmp.path();
+    init_repo(repo);
+
+    // Base commit: a regular file
+    write_file(repo, "src/core/link_target.rs", "fn placeholder() {}\n");
+    write_file(repo, "src/core/changed.rs", "fn original() {}\n");
+    commit_all(repo, "base");
+    let base = git(repo, &["rev-parse", "HEAD"]);
+
+    // Head commit: replace the regular file with a symlink (type change 'T')
+    let changed_path = repo.join("src/core/changed.rs");
+    std::fs::remove_file(&changed_path).unwrap();
+    std::os::unix::fs::symlink("/dev/null", &changed_path).unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-m", "head"]);
+    let head = git(repo, &["rev-parse", "HEAD"]);
+
+    let config = StackcutConfig::default();
+
+    let (_, units) = collect_edit_units(repo, &base, &head, &config)
+        .expect("collect_edit_units failed");
+
+    // The type-changed file must produce an EditUnit with Unknown status and
+    // the "unsupported-symlink" note.
+    let type_changed = units
+        .iter()
+        .find(|u| u.path == "src/core/changed.rs")
+        .expect("expected an edit unit for the type-changed file");
+
+    assert_eq!(
+        type_changed.status,
+        stackcut_core::ChangeStatus::Unknown,
+        "type-change must produce Unknown status"
+    );
+    assert!(
+        type_changed.notes.iter().any(|n| n == "unsupported-symlink"),
+        "type-change must carry 'unsupported-symlink' note, got: {:?}",
+        type_changed.notes
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: validate_exact_recomposition rejects plan with missing head_tree
+// ---------------------------------------------------------------------------
+
+#[test]
+fn integration_validate_exact_recomposition_missing_head_tree() {
+    let tmp = tempdir().unwrap();
+    let repo = tmp.path();
+    init_repo(repo);
+
+    write_file(repo, "src/core/file.rs", "fn foo() {}\n");
+    commit_all(repo, "base");
+    let base = git(repo, &["rev-parse", "HEAD"]);
+    let head = base.clone(); // same commit, doesn't matter — we bail before touching git
+
+    // Construct a plan with head_tree deliberately set to None
+    let source = PlanSource {
+        repo_root: None,
+        base: base.clone(),
+        head: head.clone(),
+        head_tree: None, // missing!
+    };
+    let minimal_plan = stackcut_core::Plan {
+        version: PLAN_VERSION.to_string(),
+        source,
+        units: vec![],
+        slices: vec![],
+        ambiguities: vec![],
+        diagnostics: vec![],
+        fingerprint: None,
+        override_fingerprint: None,
+    };
+
+    // validate_exact_recomposition must fail because head_tree is None
+    let result = validate_exact_recomposition(repo, &minimal_plan);
+    assert!(
+        result.is_err(),
+        "expected error for plan with missing head_tree"
+    );
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("head_tree"),
+        "error should mention head_tree, got: {msg}"
+    );
+}
+
+#[test]
+fn integration_validate_exact_recomposition_with_receipt_missing_head_tree() {
+    let tmp = tempdir().unwrap();
+    let repo = tmp.path();
+    init_repo(repo);
+
+    write_file(repo, "src/core/file.rs", "fn foo() {}\n");
+    commit_all(repo, "base");
+    let base = git(repo, &["rev-parse", "HEAD"]);
+
+    let source = PlanSource {
+        repo_root: None,
+        base: base.clone(),
+        head: base.clone(),
+        head_tree: None,
+    };
+    let minimal_plan = stackcut_core::Plan {
+        version: PLAN_VERSION.to_string(),
+        source,
+        units: vec![],
+        slices: vec![],
+        ambiguities: vec![],
+        diagnostics: vec![],
+        fingerprint: None,
+        override_fingerprint: None,
+    };
+
+    let result = validate_exact_recomposition_with_receipt(repo, &minimal_plan);
+    assert!(
+        result.is_err(),
+        "expected error for plan with missing head_tree"
+    );
+    let msg = format!("{}", result.err().unwrap());
+    assert!(
+        msg.contains("head_tree"),
+        "error should mention head_tree, got: {msg}"
+    );
 }
 
 // ---------------------------------------------------------------------------
