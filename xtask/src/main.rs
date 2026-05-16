@@ -685,7 +685,11 @@ mod tests {
         // Expressions with ==, !=, >=, <= are not paths
         let content = "Check that `score==100` or `count>=0` or `x!=y` or `a<=b`.";
         let refs = extract_path_references(content);
-        assert!(refs.is_empty(), "comparison operators should be filtered: {:?}", refs);
+        assert!(
+            refs.is_empty(),
+            "comparison operators should be filtered: {:?}",
+            refs
+        );
     }
 
     #[test]
@@ -701,7 +705,11 @@ mod tests {
         // A bare filename with an extension not in the allowed list should be filtered
         let content = "See `MyScript.exe` for the binary.";
         let refs = extract_path_references(content);
-        assert!(refs.is_empty(), "unknown extension should be filtered: {:?}", refs);
+        assert!(
+            refs.is_empty(),
+            "unknown extension should be filtered: {:?}",
+            refs
+        );
     }
 
     #[test]
@@ -709,7 +717,11 @@ mod tests {
         // A bare identifier with no dot should be filtered
         let content = "See `MyConfig` for details.";
         let refs = extract_path_references(content);
-        assert!(refs.is_empty(), "bare name without dot should be filtered: {:?}", refs);
+        assert!(
+            refs.is_empty(),
+            "bare name without dot should be filtered: {:?}",
+            refs
+        );
     }
 
     #[test]
@@ -785,9 +797,10 @@ mod tests {
     #[test]
     fn find_broken_references_no_path_refs_in_content() {
         // Content that has no file references at all
-        let docs = vec![
-            ("README.md".to_string(), "Just some prose with no paths.".to_string()),
-        ];
+        let docs = vec![(
+            "README.md".to_string(),
+            "Just some prose with no paths.".to_string(),
+        )];
         let result = find_broken_references(&docs);
         assert!(result.is_empty());
     }
@@ -805,12 +818,10 @@ mod tests {
             return;
         }
 
-        let docs = vec![
-            (
-                "FAKE_DOC.md".to_string(),
-                "See `Cargo.toml` for workspace config.".to_string(),
-            ),
-        ];
+        let docs = vec![(
+            "FAKE_DOC.md".to_string(),
+            "See `Cargo.toml` for workspace config.".to_string(),
+        )];
         let result = find_broken_references(&docs);
         assert!(
             result.is_empty(),
@@ -821,12 +832,10 @@ mod tests {
 
     #[test]
     fn find_broken_references_broken_ref() {
-        let docs = vec![
-            (
-                "some_doc.md".to_string(),
-                "See `nonexistent/path/that/does/not/exist.md` for details.".to_string(),
-            ),
-        ];
+        let docs = vec![(
+            "some_doc.md".to_string(),
+            "See `nonexistent/path/that/does/not/exist.md` for details.".to_string(),
+        )];
         let result = find_broken_references(&docs);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, "some_doc.md");
@@ -840,10 +849,7 @@ mod tests {
                 "doc_a.md".to_string(),
                 "See `no/such/file_a.md` here.".to_string(),
             ),
-            (
-                "doc_b.md".to_string(),
-                "Nothing special here.".to_string(),
-            ),
+            ("doc_b.md".to_string(), "Nothing special here.".to_string()),
             (
                 "doc_c.md".to_string(),
                 "See `no/such/file_c.md` here.".to_string(),
@@ -898,19 +904,28 @@ mod tests {
 
         // Title and auto-generated notice
         assert!(md.contains("# Scenario Index"), "missing title");
-        assert!(md.contains("Auto-generated"), "missing auto-generated notice");
+        assert!(
+            md.contains("Auto-generated"),
+            "missing auto-generated notice"
+        );
 
         // Summary table row
         assert!(md.contains("my-case"), "missing display_name in summary");
 
         // Detail section header uses dir_name
-        assert!(md.contains("## 01-my-case"), "missing dir_name section header");
+        assert!(
+            md.contains("## 01-my-case"),
+            "missing dir_name section header"
+        );
 
         // Slice table contains the slice id
         assert!(md.contains("behavior-core"), "missing slice id");
 
         // Empty depends_on renders as em-dash
-        assert!(md.contains('\u{2014}'), "missing em-dash for empty depends_on");
+        assert!(
+            md.contains('\u{2014}'),
+            "missing em-dash for empty depends_on"
+        );
     }
 
     #[test]
@@ -956,7 +971,10 @@ mod tests {
         }];
 
         let md = render_scenario_index(&cases);
-        assert!(md.contains("- mechanical: 2"), "missing mechanical kind count");
+        assert!(
+            md.contains("- mechanical: 2"),
+            "missing mechanical kind count"
+        );
         assert!(md.contains("- test: 2"), "missing test kind count");
     }
 
