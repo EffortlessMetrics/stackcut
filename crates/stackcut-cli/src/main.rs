@@ -2212,4 +2212,402 @@ mod tests {
         let exit = cmd_validate(&plan_path, false, None, &OutputFormat::Json).unwrap();
         assert_eq!(exit, ExitCode::StructuralError as i32);
     }
+
+    // ── DoctorStatus Display impl ────────────────────────────────────────
+
+    #[test]
+    fn doctor_status_display_ok() {
+        assert_eq!(format!("{}", DoctorStatus::Ok), "ok");
+    }
+
+    #[test]
+    fn doctor_status_display_warning() {
+        assert_eq!(format!("{}", DoctorStatus::Warning), "warn");
+    }
+
+    #[test]
+    fn doctor_status_display_error() {
+        assert_eq!(format!("{}", DoctorStatus::Error), "ERROR");
+    }
+
+    // ── existing_path helper ─────────────────────────────────────────────
+
+    #[test]
+    fn existing_path_returns_some_for_existing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = existing_path(dir.path().to_path_buf());
+        assert!(result.is_some(), "existing_path should return Some for a path that exists");
+        assert_eq!(result.unwrap(), dir.path());
+    }
+
+    #[test]
+    fn existing_path_returns_none_for_missing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does_not_exist");
+        let result = existing_path(missing);
+        assert!(result.is_none(), "existing_path should return None for a path that does not exist");
+    }
+
+    // ── load_toml_or_default helper ──────────────────────────────────────
+
+    #[test]
+    fn load_toml_or_default_none_returns_default() {
+        let result = load_toml_or_default::<Overrides>(None);
+        assert!(result.is_ok(), "None path should return Ok(default)");
+        let value = result.unwrap();
+        assert_eq!(value, Overrides::default());
+    }
+
+    #[test]
+    fn load_toml_or_default_some_valid_path_returns_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_path = dir.path().join("override.toml");
+        // Write minimal valid Overrides TOML (version=1 is required by Overrides struct)
+        fs::write(&toml_path, "version = 1\n").unwrap();
+        let result = load_toml_or_default::<Overrides>(Some(&toml_path));
+        assert!(result.is_ok(), "Valid TOML path should parse successfully");
+    }
+
+    #[test]
+    fn load_toml_or_default_some_nonexistent_path_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nonexistent.toml");
+        let result = load_toml_or_default::<Overrides>(Some(&missing));
+        assert!(result.is_err(), "Non-existent path should return Err");
+    }
+
+    // ── run_doctor_checks aggregator ─────────────────────────────────────
+
+    #[test]
+    fn run_doctor_checks_non_git_dir_returns_only_git_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let checks = run_doctor_checks(dir.path());
+        // Should return early after the git-repo check fails
+        assert_eq!(checks.len(), 1, "should return exactly 1 check for a non-git dir");
+        assert_eq!(checks[0].name, "git-repo");
+        assert_eq!(checks[0].status, DoctorStatus::Error);
+    }
+
+    // ── cmd_emit_proof tests ─────────────────────────────────────────────
+
+    #[test]
+    fn cmd_emit_proof_to_file_returns_success_and_creates_file() {
+        let plan = minimal_plan(PLAN_VERSION);
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.json");
+        write_plan(&plan_path, &plan).unwrap();
+
+        let out_path = dir.path().join("proof.md");
+        let result = cmd_emit_proof(&plan_path, Some(&out_path)).unwrap();
+        assert_eq!(result, ExitCode::Success as i32);
+        assert!(out_path.exists(), "proof output file should be created");
+        let contents = fs::read_to_string(&out_path).unwrap();
+        assert!(!contents.is_empty(), "proof output file should be non-empty");
+    }
+
+    #[test]
+    fn cmd_emit_proof_to_stdout_returns_success() {
+        let plan = minimal_plan(PLAN_VERSION);
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.json");
+        write_plan(&plan_path, &plan).unwrap();
+
+        let result = cmd_emit_proof(&plan_path, None).unwrap();
+        assert_eq!(result, ExitCode::Success as i32);
+    }
+
+    // ── cmd_emit_sarif tests ─────────────────────────────────────────────
+
+    #[test]
+    fn cmd_emit_sarif_to_file_returns_success_and_creates_file() {
+        let plan = minimal_plan(PLAN_VERSION);
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.json");
+        write_plan(&plan_path, &plan).unwrap();
+
+        let out_path = dir.path().join("results.sarif");
+        let result = cmd_emit_sarif(&plan_path, Some(&out_path)).unwrap();
+        assert_eq!(result, ExitCode::Success as i32);
+        assert!(out_path.exists(), "SARIF output file should be created");
+        let contents = fs::read_to_string(&out_path).unwrap();
+        assert!(!contents.is_empty(), "SARIF output file should be non-empty");
+        // Should be valid JSON
+        let _parsed: serde_json::Value = serde_json::from_str(&contents)
+            .expect("SARIF output should be valid JSON");
+    }
+
+    #[test]
+    fn cmd_emit_sarif_to_stdout_returns_success() {
+        let plan = minimal_plan(PLAN_VERSION);
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.json");
+        write_plan(&plan_path, &plan).unwrap();
+
+        let result = cmd_emit_sarif(&plan_path, None).unwrap();
+        assert_eq!(result, ExitCode::Success as i32);
+    }
+
+    // ── cmd_emit_review_packet tests ─────────────────────────────────────
+
+    #[test]
+    fn cmd_emit_review_packet_to_file_returns_success_and_creates_file() {
+        let plan = minimal_plan(PLAN_VERSION);
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.json");
+        write_plan(&plan_path, &plan).unwrap();
+
+        let out_path = dir.path().join("review_packet.md");
+        let result = cmd_emit_review_packet(&plan_path, Some(&out_path)).unwrap();
+        assert_eq!(result, ExitCode::Success as i32);
+        assert!(out_path.exists(), "review packet output file should be created");
+        let contents = fs::read_to_string(&out_path).unwrap();
+        assert!(!contents.is_empty(), "review packet output file should be non-empty");
+    }
+
+    #[test]
+    fn cmd_emit_review_packet_to_stdout_returns_success() {
+        let plan = minimal_plan(PLAN_VERSION);
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.json");
+        write_plan(&plan_path, &plan).unwrap();
+
+        let result = cmd_emit_review_packet(&plan_path, None).unwrap();
+        assert_eq!(result, ExitCode::Success as i32);
+    }
+
+    // ── cmd_materialize error path ────────────────────────────────────────
+
+    #[test]
+    fn cmd_materialize_errors_when_repo_root_is_none() {
+        // minimal_plan has repo_root = None, which should cause an error
+        let plan = minimal_plan(PLAN_VERSION);
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.json");
+        write_plan(&plan_path, &plan).unwrap();
+
+        let out_dir = dir.path().join("patches");
+        let result = cmd_materialize(&plan_path, &out_dir, false);
+        assert!(result.is_err(), "cmd_materialize should return Err when repo_root is None");
+        let err_msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            err_msg.contains("missing source.repo_root") || err_msg.contains("repo_root"),
+            "error message should mention repo_root, got: {err_msg}"
+        );
+    }
+
+    // ── cmd_init tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn cmd_init_creates_stackcut_toml_in_git_repo() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Initialize a git repo in the temp dir
+        let status = std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git init failed");
+        assert!(status.status.success(), "git init should succeed");
+
+        let result = cmd_init(dir.path(), false).unwrap();
+        assert_eq!(result, ExitCode::Success as i32, "cmd_init should return Success");
+
+        let config_path = dir.path().join("stackcut.toml");
+        assert!(config_path.exists(), "stackcut.toml should be created");
+        let contents = fs::read_to_string(&config_path).unwrap();
+        assert!(contents.contains("# stackcut configuration"), "config should contain header comment");
+    }
+
+    #[test]
+    fn cmd_init_returns_structural_error_if_config_exists_without_force() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Initialize a git repo
+        let status = std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git init failed");
+        assert!(status.status.success(), "git init should succeed");
+
+        // Pre-create stackcut.toml
+        fs::write(dir.path().join("stackcut.toml"), "# existing config\n").unwrap();
+
+        let result = cmd_init(dir.path(), false).unwrap();
+        assert_eq!(
+            result,
+            ExitCode::StructuralError as i32,
+            "cmd_init without --force should return StructuralError when config exists"
+        );
+
+        // Original content should be preserved
+        let contents = fs::read_to_string(dir.path().join("stackcut.toml")).unwrap();
+        assert_eq!(contents, "# existing config\n");
+    }
+
+    #[test]
+    fn cmd_init_with_force_overwrites_existing_config() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Initialize a git repo
+        let status = std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git init failed");
+        assert!(status.status.success(), "git init should succeed");
+
+        // Pre-create stackcut.toml
+        fs::write(dir.path().join("stackcut.toml"), "# existing config\n").unwrap();
+
+        let result = cmd_init(dir.path(), true).unwrap();
+        assert_eq!(result, ExitCode::Success as i32, "cmd_init --force should return Success");
+
+        let contents = fs::read_to_string(dir.path().join("stackcut.toml")).unwrap();
+        assert!(
+            contents.contains("# stackcut configuration"),
+            "config should be overwritten with generated content"
+        );
+    }
+
+    // ── run_doctor_checks with git repo (success path) ───────────────────
+
+    #[test]
+    fn run_doctor_checks_git_repo_returns_multiple_checks() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Initialize a git repo
+        let status = std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git init failed");
+        assert!(status.status.success(), "git init should succeed");
+
+        let checks = run_doctor_checks(dir.path());
+        // Should have more than just the git-repo check
+        assert!(checks.len() > 1, "should run all checks when git repo is found");
+        // First check should be git-repo with Ok status
+        assert_eq!(checks[0].name, "git-repo");
+        assert_eq!(checks[0].status, DoctorStatus::Ok);
+        // Should have config-file, path-families, override-file, output-dir, manifest-coverage, codeowners
+        let names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"config-file"), "missing config-file check");
+        assert!(names.contains(&"path-families"), "missing path-families check");
+        assert!(names.contains(&"override-file"), "missing override-file check");
+        assert!(names.contains(&"output-dir"), "missing output-dir check");
+        assert!(names.contains(&"manifest-coverage"), "missing manifest-coverage check");
+        assert!(names.contains(&"codeowners"), "missing codeowners check");
+    }
+
+    // ── cmd_doctor tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn cmd_doctor_non_git_dir_returns_structural_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = cmd_doctor(dir.path()).unwrap();
+        assert_eq!(result, ExitCode::StructuralError as i32,
+            "cmd_doctor should return StructuralError when no git repo");
+    }
+
+    #[test]
+    fn cmd_doctor_git_repo_returns_success() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Initialize a git repo
+        let status = std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git init failed");
+        assert!(status.status.success(), "git init should succeed");
+
+        let result = cmd_doctor(dir.path()).unwrap();
+        // With a fresh git repo and no errors, should return Success
+        assert_eq!(result, ExitCode::Success as i32,
+            "cmd_doctor should return Success when git repo is found with no errors");
+    }
+
+    // ── cmd_validate text output path tests ──────────────────────────────
+
+    #[test]
+    fn cmd_validate_text_format_ok_plan_returns_success() {
+        let plan = minimal_plan(PLAN_VERSION);
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.json");
+        // Write with proper fingerprint
+        write_plan(&plan_path, &plan).unwrap();
+
+        let result = cmd_validate(&plan_path, false, None, &OutputFormat::Text).unwrap();
+        assert_eq!(result, ExitCode::Success as i32);
+    }
+
+    #[test]
+    fn cmd_validate_text_format_fingerprint_mismatch_still_succeeds() {
+        // Plan with an intentionally wrong fingerprint
+        let mut plan = minimal_plan(PLAN_VERSION);
+        plan.fingerprint = Some("wrong_fingerprint".to_string());
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.json");
+        let json = serde_json::to_string_pretty(&plan).unwrap();
+        fs::write(&plan_path, format!("{json}\n")).unwrap();
+
+        // Fingerprint mismatch is a warning, not an error — should still succeed
+        let result = cmd_validate(&plan_path, false, None, &OutputFormat::Text).unwrap();
+        assert_eq!(result, ExitCode::Success as i32);
+    }
+
+    #[test]
+    fn cmd_validate_with_fingerprint_in_plan_exercises_fingerprint_check() {
+        // Write plan with correct fingerprint to exercise the fingerprint_check path
+        let plan = minimal_plan(PLAN_VERSION);
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.json");
+        // write_plan sets the fingerprint
+        write_plan(&plan_path, &plan).unwrap();
+
+        // Re-read and verify fingerprint is set
+        let read_back = read_plan(&plan_path).unwrap();
+        assert!(read_back.fingerprint.is_some(), "plan should have fingerprint after write_plan");
+
+        // cmd_validate with the fingerprint set should go through the fingerprint_check branch
+        let result = cmd_validate(&plan_path, false, None, &OutputFormat::Json).unwrap();
+        assert_eq!(result, ExitCode::Success as i32);
+    }
+
+    // ── cmd_validate exact flag with no repo_root ─────────────────────────
+
+    #[test]
+    fn cmd_validate_exact_without_repo_root_returns_err() {
+        // Plan has no repo_root — exact validation should return Err
+        let plan = minimal_plan(PLAN_VERSION);
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.json");
+        write_plan(&plan_path, &plan).unwrap();
+
+        let result = cmd_validate(&plan_path, true, None, &OutputFormat::Text);
+        assert!(result.is_err(), "exact validation without repo_root should return Err");
+    }
+
+    // ── render_config_toml with review_budget set ─────────────────────────
+
+    #[test]
+    fn render_config_toml_with_review_budget() {
+        let config = StackcutConfig {
+            version: 1,
+            generated_prefixes: vec!["generated/".to_string()],
+            manifest_files: vec![],
+            lock_files: vec![],
+            test_prefixes: vec!["tests/".to_string()],
+            doc_prefixes: vec![],
+            ops_prefixes: vec![],
+            path_families: vec![],
+            review_budget: Some(15),
+        };
+
+        let toml_str = render_config_toml(&config);
+        assert!(toml_str.contains("review_budget = 15"), "should contain review_budget");
+        let parsed: StackcutConfig = toml::from_str(&toml_str).expect("should parse");
+        assert_eq!(parsed.review_budget, Some(15));
+    }
 }
