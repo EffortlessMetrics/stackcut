@@ -97,6 +97,78 @@ fn apply_rename_slices(slices: &mut [Slice], overrides: &Overrides) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ForceMemberOverride;
+
+    use super::super::shared::new_slice;
+
+    fn make_slice(id: &str, members: Vec<&str>) -> Slice {
+        new_slice(
+            id,
+            id,
+            SliceKind::Behavior,
+            vec!["test-family".to_string()],
+            members.into_iter().map(|s| s.to_string()).collect(),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn apply_force_members_creates_new_slice_when_target_missing() {
+        // Two slices exist; the override targets a slice ID that does not exist yet.
+        let mut slices = vec![
+            make_slice("slice-alpha", vec!["unit-a", "unit-b"]),
+            make_slice("slice-beta", vec!["unit-c"]),
+        ];
+
+        let overrides = Overrides {
+            force_members: vec![ForceMemberOverride {
+                member: "unit-b".to_string(),
+                slice: "nonexistent-slice".to_string(),
+                reason: None,
+            }],
+            ..Default::default()
+        };
+
+        apply_force_members(&mut slices, &overrides);
+
+        // A new slice must have been created.
+        let new_slice = slices
+            .iter()
+            .find(|s| s.id == "nonexistent-slice")
+            .expect("new slice 'nonexistent-slice' must be created");
+
+        // The member must have moved into the new slice.
+        assert!(
+            new_slice.members.contains(&"unit-b".to_string()),
+            "unit-b should be in the newly-created slice"
+        );
+
+        // The creation reason must be present.
+        assert!(
+            new_slice
+                .reasons
+                .iter()
+                .any(|r| r.message == "Created to satisfy force_members override."),
+            "new slice must carry the creation reason; reasons: {:?}",
+            new_slice.reasons
+        );
+
+        // The member must no longer appear in the original slice.
+        let alpha = slices
+            .iter()
+            .find(|s| s.id == "slice-alpha")
+            .expect("slice-alpha must still exist");
+        assert!(
+            !alpha.members.contains(&"unit-b".to_string()),
+            "unit-b should have been moved out of slice-alpha"
+        );
+    }
+}
+
 fn apply_must_order(slices: &mut [Slice], overrides: &Overrides) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     for rule in &overrides.must_order {

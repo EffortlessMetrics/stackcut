@@ -47,6 +47,77 @@ pub(super) fn build_standalone_slices(
     slices
 }
 
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use crate::{ChangeStatus, EditUnit, UnitKind};
+
+    use super::build_misc_unassigned;
+
+    fn make_unit(id: &str, family: &str) -> EditUnit {
+        EditUnit {
+            id: id.to_string(),
+            path: format!("src/{}.rs", id),
+            old_path: None,
+            status: ChangeStatus::Modified,
+            kind: UnitKind::Behavior,
+            family: family.to_string(),
+            notes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn build_misc_unassigned_returns_some_when_unassigned_units_exist() {
+        let units = vec![
+            make_unit("unit-assigned", "core"),
+            make_unit("unit-free", "core"),
+        ];
+        let mut assigned = BTreeSet::new();
+        assigned.insert("unit-assigned".to_string());
+
+        let result = build_misc_unassigned(&units, &assigned);
+
+        let (slice, ids) = result.expect("should return Some when there are unassigned units");
+
+        assert_eq!(slice.id, "misc-unassigned");
+
+        assert!(
+            slice.members.contains(&"unit-free".to_string()),
+            "slice members should contain the unassigned unit; got: {:?}",
+            slice.members
+        );
+        assert!(
+            !slice.members.contains(&"unit-assigned".to_string()),
+            "slice members must not contain the already-assigned unit"
+        );
+
+        assert!(
+            slice
+                .reasons
+                .iter()
+                .any(|r| r.code == "misc-catchall"),
+            "slice must carry the 'misc-catchall' reason code; reasons: {:?}",
+            slice.reasons
+        );
+
+        assert!(
+            ids.contains(&"unit-free".to_string()),
+            "returned id list should contain the unassigned unit"
+        );
+    }
+
+    #[test]
+    fn build_misc_unassigned_returns_none_when_all_assigned() {
+        let units = vec![make_unit("unit-a", "core")];
+        let mut assigned = BTreeSet::new();
+        assigned.insert("unit-a".to_string());
+
+        let result = build_misc_unassigned(&units, &assigned);
+        assert!(result.is_none(), "should return None when every unit is assigned");
+    }
+}
+
 pub(super) fn build_misc_unassigned(
     units: &[EditUnit],
     assigned: &BTreeSet<String>,
