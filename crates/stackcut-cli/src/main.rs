@@ -2236,7 +2236,10 @@ mod tests {
     fn existing_path_returns_some_for_existing_dir() {
         let dir = tempfile::tempdir().unwrap();
         let result = existing_path(dir.path().to_path_buf());
-        assert!(result.is_some(), "existing_path should return Some for a path that exists");
+        assert!(
+            result.is_some(),
+            "existing_path should return Some for a path that exists"
+        );
         assert_eq!(result.unwrap(), dir.path());
     }
 
@@ -2245,7 +2248,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("does_not_exist");
         let result = existing_path(missing);
-        assert!(result.is_none(), "existing_path should return None for a path that does not exist");
+        assert!(
+            result.is_none(),
+            "existing_path should return None for a path that does not exist"
+        );
     }
 
     // ── load_toml_or_default helper ──────────────────────────────────────
@@ -2283,7 +2289,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let checks = run_doctor_checks(dir.path());
         // Should return early after the git-repo check fails
-        assert_eq!(checks.len(), 1, "should return exactly 1 check for a non-git dir");
+        assert_eq!(
+            checks.len(),
+            1,
+            "should return exactly 1 check for a non-git dir"
+        );
         assert_eq!(checks[0].name, "git-repo");
         assert_eq!(checks[0].status, DoctorStatus::Error);
     }
@@ -2302,7 +2312,10 @@ mod tests {
         assert_eq!(result, ExitCode::Success as i32);
         assert!(out_path.exists(), "proof output file should be created");
         let contents = fs::read_to_string(&out_path).unwrap();
-        assert!(!contents.is_empty(), "proof output file should be non-empty");
+        assert!(
+            !contents.is_empty(),
+            "proof output file should be non-empty"
+        );
     }
 
     #[test]
@@ -2330,10 +2343,13 @@ mod tests {
         assert_eq!(result, ExitCode::Success as i32);
         assert!(out_path.exists(), "SARIF output file should be created");
         let contents = fs::read_to_string(&out_path).unwrap();
-        assert!(!contents.is_empty(), "SARIF output file should be non-empty");
+        assert!(
+            !contents.is_empty(),
+            "SARIF output file should be non-empty"
+        );
         // Should be valid JSON
-        let _parsed: serde_json::Value = serde_json::from_str(&contents)
-            .expect("SARIF output should be valid JSON");
+        let _parsed: serde_json::Value =
+            serde_json::from_str(&contents).expect("SARIF output should be valid JSON");
     }
 
     #[test]
@@ -2359,9 +2375,15 @@ mod tests {
         let out_path = dir.path().join("review_packet.md");
         let result = cmd_emit_review_packet(&plan_path, Some(&out_path)).unwrap();
         assert_eq!(result, ExitCode::Success as i32);
-        assert!(out_path.exists(), "review packet output file should be created");
+        assert!(
+            out_path.exists(),
+            "review packet output file should be created"
+        );
         let contents = fs::read_to_string(&out_path).unwrap();
-        assert!(!contents.is_empty(), "review packet output file should be non-empty");
+        assert!(
+            !contents.is_empty(),
+            "review packet output file should be non-empty"
+        );
     }
 
     #[test]
@@ -2387,7 +2409,10 @@ mod tests {
 
         let out_dir = dir.path().join("patches");
         let result = cmd_materialize(&plan_path, &out_dir, false);
-        assert!(result.is_err(), "cmd_materialize should return Err when repo_root is None");
+        assert!(
+            result.is_err(),
+            "cmd_materialize should return Err when repo_root is None"
+        );
         let err_msg = format!("{:#}", result.unwrap_err());
         assert!(
             err_msg.contains("missing source.repo_root") || err_msg.contains("repo_root"),
@@ -2410,12 +2435,19 @@ mod tests {
         assert!(status.status.success(), "git init should succeed");
 
         let result = cmd_init(dir.path(), false).unwrap();
-        assert_eq!(result, ExitCode::Success as i32, "cmd_init should return Success");
+        assert_eq!(
+            result,
+            ExitCode::Success as i32,
+            "cmd_init should return Success"
+        );
 
         let config_path = dir.path().join("stackcut.toml");
         assert!(config_path.exists(), "stackcut.toml should be created");
         let contents = fs::read_to_string(&config_path).unwrap();
-        assert!(contents.contains("# stackcut configuration"), "config should contain header comment");
+        assert!(
+            contents.contains("# stackcut configuration"),
+            "config should contain header comment"
+        );
     }
 
     #[test]
@@ -2461,7 +2493,11 @@ mod tests {
         fs::write(dir.path().join("stackcut.toml"), "# existing config\n").unwrap();
 
         let result = cmd_init(dir.path(), true).unwrap();
-        assert_eq!(result, ExitCode::Success as i32, "cmd_init --force should return Success");
+        assert_eq!(
+            result,
+            ExitCode::Success as i32,
+            "cmd_init --force should return Success"
+        );
 
         let contents = fs::read_to_string(dir.path().join("stackcut.toml")).unwrap();
         assert!(
@@ -2486,17 +2522,29 @@ mod tests {
 
         let checks = run_doctor_checks(dir.path());
         // Should have more than just the git-repo check
-        assert!(checks.len() > 1, "should run all checks when git repo is found");
+        assert!(
+            checks.len() > 1,
+            "should run all checks when git repo is found"
+        );
         // First check should be git-repo with Ok status
         assert_eq!(checks[0].name, "git-repo");
         assert_eq!(checks[0].status, DoctorStatus::Ok);
         // Should have config-file, path-families, override-file, output-dir, manifest-coverage, codeowners
         let names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"config-file"), "missing config-file check");
-        assert!(names.contains(&"path-families"), "missing path-families check");
-        assert!(names.contains(&"override-file"), "missing override-file check");
+        assert!(
+            names.contains(&"path-families"),
+            "missing path-families check"
+        );
+        assert!(
+            names.contains(&"override-file"),
+            "missing override-file check"
+        );
         assert!(names.contains(&"output-dir"), "missing output-dir check");
-        assert!(names.contains(&"manifest-coverage"), "missing manifest-coverage check");
+        assert!(
+            names.contains(&"manifest-coverage"),
+            "missing manifest-coverage check"
+        );
         assert!(names.contains(&"codeowners"), "missing codeowners check");
     }
 
@@ -2506,8 +2554,11 @@ mod tests {
     fn cmd_doctor_non_git_dir_returns_structural_error() {
         let dir = tempfile::tempdir().unwrap();
         let result = cmd_doctor(dir.path()).unwrap();
-        assert_eq!(result, ExitCode::StructuralError as i32,
-            "cmd_doctor should return StructuralError when no git repo");
+        assert_eq!(
+            result,
+            ExitCode::StructuralError as i32,
+            "cmd_doctor should return StructuralError when no git repo"
+        );
     }
 
     #[test]
@@ -2524,8 +2575,11 @@ mod tests {
 
         let result = cmd_doctor(dir.path()).unwrap();
         // With a fresh git repo and no errors, should return Success
-        assert_eq!(result, ExitCode::Success as i32,
-            "cmd_doctor should return Success when git repo is found with no errors");
+        assert_eq!(
+            result,
+            ExitCode::Success as i32,
+            "cmd_doctor should return Success when git repo is found with no errors"
+        );
     }
 
     // ── cmd_validate text output path tests ──────────────────────────────
@@ -2568,7 +2622,10 @@ mod tests {
 
         // Re-read and verify fingerprint is set
         let read_back = read_plan(&plan_path).unwrap();
-        assert!(read_back.fingerprint.is_some(), "plan should have fingerprint after write_plan");
+        assert!(
+            read_back.fingerprint.is_some(),
+            "plan should have fingerprint after write_plan"
+        );
 
         // cmd_validate with the fingerprint set should go through the fingerprint_check branch
         let result = cmd_validate(&plan_path, false, None, &OutputFormat::Json).unwrap();
@@ -2586,7 +2643,10 @@ mod tests {
         write_plan(&plan_path, &plan).unwrap();
 
         let result = cmd_validate(&plan_path, true, None, &OutputFormat::Text);
-        assert!(result.is_err(), "exact validation without repo_root should return Err");
+        assert!(
+            result.is_err(),
+            "exact validation without repo_root should return Err"
+        );
     }
 
     // ── render_config_toml with review_budget set ─────────────────────────
@@ -2606,7 +2666,10 @@ mod tests {
         };
 
         let toml_str = render_config_toml(&config);
-        assert!(toml_str.contains("review_budget = 15"), "should contain review_budget");
+        assert!(
+            toml_str.contains("review_budget = 15"),
+            "should contain review_budget"
+        );
         let parsed: StackcutConfig = toml::from_str(&toml_str).expect("should parse");
         assert_eq!(parsed.review_budget, Some(15));
     }
