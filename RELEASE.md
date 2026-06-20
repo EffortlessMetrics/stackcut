@@ -18,11 +18,23 @@
 
 ## Public artifact contract
 
-These are the user-facing contracts for v0.1:
+These are the user-facing contracts for v0.1.
 
-- `plan.json`
+Core artifacts written by `plan` / `materialize`:
+
+- `plan.json` (schema: `schema/stackcut.plan.schema.json`)
 - `summary.md`
 - `diagnostics.json`
 - patch files emitted by `materialize`
 
-Those should remain stable unless a versioned change is intentional.
+Derived artifacts emitted on demand:
+
+- SARIF 2.1.0 JSON from `emit-sarif`
+- proof-surface hints from `emit-proof`
+- review packet (Markdown) from `emit-review-packet`
+- `override.toml` skeleton from `scaffold-overrides`
+
+Those should remain stable unless a versioned change is intentional. The CLI
+exit-code contract (`0` success, `1` structural, `2` recomposition, `3`
+override conflict, `4` unsupported surface, `10` internal bug) is equally
+stable — see the README command reference.

@@ -70,11 +70,13 @@ fixtures/             # canonical cases and expected plans
 
 ## CLI
 
+The core pipeline is four commands:
+
 ```bash
 stackcut plan --base <rev> --head <rev>
 stackcut explain .stackcut/plan.json
 stackcut validate .stackcut/plan.json --exact
-stackcut materialize .stackcut/plan.json --out .stackcut/patches
+stackcut materialize .stackcut/plan.json --out-dir .stackcut/patches
 ```
 
 `plan` writes three artifacts by default:
@@ -82,6 +84,35 @@ stackcut materialize .stackcut/plan.json --out .stackcut/patches
 - `.stackcut/plan.json`
 - `.stackcut/summary.md`
 - `.stackcut/diagnostics.json`
+
+### Command reference
+
+| Command | Key flags | What it does |
+| --- | --- | --- |
+| `plan` | `--base <rev> --head <rev>` `[--repo .]` `[--out-dir .stackcut]` `[--config <path>]` `[--overrides <path>]` `[--dry-run]` | Plan a file-scoped stack from a git range. `--dry-run` prints plan JSON to stdout without writing files. |
+| `explain` | `<plan>` `[--why <slice>]` | Render a stored plan as Markdown. `--why` focuses one slice. |
+| `validate` | `<plan>` `[--exact]` `[--receipt <path>]` `[--format text\|json]` | Structural validation; `--exact` also verifies exact recomposition. `--receipt` writes a recomposition receipt. |
+| `materialize` | `<plan>` `[--out-dir .stackcut/patches]` `[--dry-run]` | Emit a patch series per slice. `--dry-run` validates application with rollback, writing nothing. |
+| `doctor` | `[--repo .]` | Check repo readiness (git availability, clean state, config). |
+| `compare` | `<old> <new>` `[--json]` | Diff two plans and report what changed. |
+| `init` | `[--repo .]` `[--force]` | Scaffold a starter `stackcut.toml`. |
+| `scaffold-overrides` | `<plan>` `[--output .stackcut/override.toml]` `[--force]` | Generate an `override.toml` skeleton from a plan's ambiguities. |
+| `emit-sarif` | `<plan>` `[-o <path>]` | Emit diagnostics as SARIF 2.1.0 JSON for CI code-scanning. |
+| `emit-proof` | `<plan>` `[-o <path>]` | Emit per-slice proof-surface hints. |
+| `emit-review-packet` | `<plan>` `[-o <path>]` | Emit a PR-ready review packet (Markdown). |
+
+### Exit codes
+
+Every command resolves to exactly one stable exit code:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success |
+| `1` | Structural error (plan failed structural validation) |
+| `2` | Recomposition failure (`validate --exact` mismatch) |
+| `3` | Override conflict |
+| `4` | Unsupported git surface |
+| `10` | Internal bug (unexpected error) |
 
 ## Quick start
 
