@@ -135,3 +135,70 @@ fn apply_must_order(slices: &mut [Slice], overrides: &Overrides) -> Vec<Diagnost
     }
     diagnostics
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ForceMemberOverride;
+
+    use super::super::shared::new_slice;
+
+    fn make_slice(id: &str, members: Vec<&str>) -> Slice {
+        new_slice(
+            id,
+            id,
+            SliceKind::Behavior,
+            vec!["test-family".to_string()],
+            members.into_iter().map(|s| s.to_string()).collect(),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn apply_force_members_creates_new_slice_when_target_missing() {
+        let mut slices = vec![
+            make_slice("slice-alpha", vec!["unit-a", "unit-b"]),
+            make_slice("slice-beta", vec!["unit-c"]),
+        ];
+
+        let overrides = Overrides {
+            force_members: vec![ForceMemberOverride {
+                member: "unit-b".to_string(),
+                slice: "nonexistent-slice".to_string(),
+                reason: None,
+            }],
+            ..Default::default()
+        };
+
+        apply_force_members(&mut slices, &overrides);
+
+        let new_slice = slices
+            .iter()
+            .find(|s| s.id == "nonexistent-slice")
+            .expect("new slice 'nonexistent-slice' must be created");
+
+        assert!(
+            new_slice.members.contains(&"unit-b".to_string()),
+            "unit-b should be in the newly-created slice"
+        );
+
+        assert!(
+            new_slice
+                .reasons
+                .iter()
+                .any(|r| r.message == "Created to satisfy force_members override."),
+            "new slice must carry the creation reason; reasons: {:?}",
+            new_slice.reasons
+        );
+
+        let alpha = slices
+            .iter()
+            .find(|s| s.id == "slice-alpha")
+            .expect("slice-alpha must still exist");
+        assert!(
+            !alpha.members.contains(&"unit-b".to_string()),
+            "unit-b should have been moved out of slice-alpha"
+        );
+    }
+}
