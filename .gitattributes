@@ -1,0 +1,16 @@
+# Normalize line endings to LF in the repository and on checkout.
+# Prevents phantom CRLF diffs when editing on Windows (core.autocrlf=false).
+* text=auto eol=lf
+
+# Explicit for the file types in this workspace.
+*.rs   text eol=lf
+*.toml text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.lock text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+# Treat patch fixtures as exact bytes — never touch their endings.
+*.patch -text
+*.diff  -text
