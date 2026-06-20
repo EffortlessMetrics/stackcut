@@ -4,6 +4,62 @@
 
 Complete the stackcut v0.1 build by closing gaps between documented contracts and running code. Build order: contract drift → overrides → validation → planner deepening → git edge hardening → proof surface & artifacts. All 26 correctness properties get proptest-based tests. Dependency direction is preserved: no reverse edges into `stackcut-core`.
 
+## Task Dependency Graph
+
+The build proceeds in sequential waves separated by checkpoints. Each checkpoint depends on all tasks in the wave before it, and the wave after a checkpoint depends on that checkpoint.
+
+```mermaid
+graph TD
+    T1["1. Contract drift fixes"] --> T2["2. Checkpoint — contract drift"]
+    T2 --> T3["3. Override engine — parsing & validation"]
+    T2 --> T4["4. Override engine — application verbs"]
+    T3 --> T5["5. Checkpoint — override engine"]
+    T4 --> T5
+    T5 --> T6["6. Validate command & exit codes"]
+    T6 --> T7["7. Planner deepening"]
+    T7 --> T8["8. Checkpoint — planner deepening"]
+    T8 --> T9["9. Git edge hardening"]
+    T9 --> T10["10. Checkpoint — git edge hardening"]
+    T10 --> T11["11. Artifact fingerprint & diagnostics"]
+    T11 --> T12["12. Checkpoint — artifacts"]
+    T12 --> T13["13. Proof surface — round-trip & invariants"]
+    T13 --> T14["14. Checkpoint — property tests"]
+    T14 --> T15["15. Proof surface — golden/snapshot/integration"]
+    T15 --> T16["16. Final wiring & integration"]
+    T16 --> T17["17. Final checkpoint"]
+```
+
+Notes on intra-task ordering:
+
+- Within task 1, subtask 1.3 depends on 1.2 (config parser must exist before its property tests).
+- Within task 3, subtask 3.2 depends on 3.1 (`validate_overrides` must exist before its property test).
+- Within task 4, subtask 4.2 depends on 4.1 (cycle-detection signature change precedes the property tests).
+- Within task 6, subtask 6.2 depends on 6.1 (`ExitCode` enum precedes `cmd_validate` promotion).
+- Within tasks 7, 9, 11, 13, and 15, each property/test subtask depends on the implementation subtask it validates.
+
+```json
+{
+  "waves": [
+    { "wave": 1, "tasks": ["1"], "dependsOn": [] },
+    { "wave": 2, "tasks": ["2"], "dependsOn": ["1"] },
+    { "wave": 3, "tasks": ["3", "4"], "dependsOn": ["2"] },
+    { "wave": 4, "tasks": ["5"], "dependsOn": ["3", "4"] },
+    { "wave": 5, "tasks": ["6"], "dependsOn": ["5"] },
+    { "wave": 6, "tasks": ["7"], "dependsOn": ["6"] },
+    { "wave": 7, "tasks": ["8"], "dependsOn": ["7"] },
+    { "wave": 8, "tasks": ["9"], "dependsOn": ["8"] },
+    { "wave": 9, "tasks": ["10"], "dependsOn": ["9"] },
+    { "wave": 10, "tasks": ["11"], "dependsOn": ["10"] },
+    { "wave": 11, "tasks": ["12"], "dependsOn": ["11"] },
+    { "wave": 12, "tasks": ["13"], "dependsOn": ["12"] },
+    { "wave": 13, "tasks": ["14"], "dependsOn": ["13"] },
+    { "wave": 14, "tasks": ["15"], "dependsOn": ["14"] },
+    { "wave": 15, "tasks": ["16"], "dependsOn": ["15"] },
+    { "wave": 16, "tasks": ["17"], "dependsOn": ["16"] }
+  ]
+}
+```
+
 ## Tasks
 
 - [x] 1. Contract drift fixes (xtask alias, CI, config parser, docs-check)

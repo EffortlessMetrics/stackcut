@@ -2,3 +2,4 @@
 /.stackcut
 *.log
 .DS_Store
+/.claude/
