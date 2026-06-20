@@ -90,6 +90,29 @@ fn run_cargo(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Scenario index types (hoisted to module scope for testability)
+// ---------------------------------------------------------------------------
+
+struct CaseInfo {
+    dir_name: String,
+    display_name: String,
+    num: usize,
+    unit_count: usize,
+    slice_count: usize,
+    ambiguity_count: usize,
+    families: Vec<String>,
+    unit_kinds: BTreeMap<String, usize>,
+    slices: Vec<SliceInfo>,
+}
+
+struct SliceInfo {
+    id: String,
+    kind: String,
+    member_count: usize,
+    depends_on: Vec<String>,
+}
+
 /// Scan `fixtures/cases/` and generate `docs/SCENARIO_INDEX.md`.
 fn generate_scenario_index() -> Result<()> {
     let cases_dir = Path::new("fixtures/cases");
@@ -103,25 +126,6 @@ fn generate_scenario_index() -> Result<()> {
         .filter(|e| e.path().is_dir())
         .collect();
     entries.sort_by_key(|e| e.file_name());
-
-    struct CaseInfo {
-        dir_name: String,
-        display_name: String,
-        num: usize,
-        unit_count: usize,
-        slice_count: usize,
-        ambiguity_count: usize,
-        families: Vec<String>,
-        unit_kinds: BTreeMap<String, usize>,
-        slices: Vec<SliceInfo>,
-    }
-
-    struct SliceInfo {
-        id: String,
-        kind: String,
-        member_count: usize,
-        depends_on: Vec<String>,
-    }
 
     let mut cases = Vec::new();
 
@@ -226,7 +230,24 @@ fn generate_scenario_index() -> Result<()> {
         });
     }
 
-    // Build the Markdown output
+    let md = render_scenario_index(&cases);
+
+    let output_path = Path::new("docs/SCENARIO_INDEX.md");
+    fs::create_dir_all(output_path.parent().unwrap())
+        .context("failed to create docs/ directory")?;
+    fs::write(output_path, &md)
+        .with_context(|| format!("failed to write {}", output_path.display()))?;
+
+    println!(
+        "scenario-index: generated {} ({} cases)",
+        output_path.display(),
+        cases.len()
+    );
+    Ok(())
+}
+
+/// Pure renderer: takes already-loaded case data, returns the Markdown string.
+fn render_scenario_index(cases: &[CaseInfo]) -> String {
     let mut md = String::new();
 
     writeln!(md, "# Scenario Index").unwrap();
@@ -243,7 +264,7 @@ fn generate_scenario_index() -> Result<()> {
     writeln!(md).unwrap();
     writeln!(md, "| # | Case | Units | Slices | Ambiguities | Families |").unwrap();
     writeln!(md, "|---|------|-------|--------|-------------|----------|").unwrap();
-    for case in &cases {
+    for case in cases {
         writeln!(
             md,
             "| {} | {} | {} | {} | {} | {} |",
@@ -258,7 +279,7 @@ fn generate_scenario_index() -> Result<()> {
     }
 
     // Detail sections
-    for case in &cases {
+    for case in cases {
         writeln!(md).unwrap();
         writeln!(md, "---").unwrap();
         writeln!(md).unwrap();
@@ -305,18 +326,7 @@ fn generate_scenario_index() -> Result<()> {
         }
     }
 
-    let output_path = Path::new("docs/SCENARIO_INDEX.md");
-    fs::create_dir_all(output_path.parent().unwrap())
-        .context("failed to create docs/ directory")?;
-    fs::write(output_path, &md)
-        .with_context(|| format!("failed to write {}", output_path.display()))?;
-
-    println!(
-        "scenario-index: generated {} ({} cases)",
-        output_path.display(),
-        cases.len()
-    );
-    Ok(())
+    md
 }
 
 /// Check that file path references in documentation files actually exist.
@@ -328,17 +338,15 @@ fn docs_check() -> Result<()> {
         "RELEASE.md",
         "docs/ARCHITECTURE.md",
     ];
-    let mut broken = Vec::new();
 
+    let mut doc_contents: Vec<(String, String)> = Vec::new();
     for doc_file in doc_files {
         let contents =
             fs::read_to_string(doc_file).with_context(|| format!("failed to read {}", doc_file))?;
-        for path_ref in extract_path_references(&contents) {
-            if !Path::new(&path_ref).exists() {
-                broken.push((doc_file.to_string(), path_ref));
-            }
-        }
+        doc_contents.push((doc_file.to_string(), contents));
     }
+
+    let broken = find_broken_references(&doc_contents);
 
     if broken.is_empty() {
         println!("docs-check: all references valid");
@@ -349,6 +357,20 @@ fn docs_check() -> Result<()> {
         }
         bail!("docs-check found {} broken references", broken.len());
     }
+}
+
+/// Pure helper: given a list of (doc_name, contents) pairs, return a list of
+/// (doc_name, broken_path) for every path reference that does not exist on disk.
+fn find_broken_references(doc_contents: &[(String, String)]) -> Vec<(String, String)> {
+    let mut broken = Vec::new();
+    for (doc_file, contents) in doc_contents {
+        for path_ref in extract_path_references(contents) {
+            if !Path::new(&path_ref).exists() {
+                broken.push((doc_file.clone(), path_ref));
+            }
+        }
+    }
+    broken
 }
 
 /// Extract file path references from markdown content.
@@ -535,6 +557,10 @@ fn looks_like_local_link(s: &str) -> bool {
 mod tests {
     use super::*;
 
+    // -----------------------------------------------------------------------
+    // Existing extract_path_references tests
+    // -----------------------------------------------------------------------
+
     #[test]
     fn extracts_backtick_paths_with_slash() {
         let content = "See `docs/ARCHITECTURE.md` for details.";
@@ -652,5 +678,430 @@ mod tests {
         let content = "Iterate `fixtures/cases/*/` for all cases.";
         let refs = extract_path_references(content);
         assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn filters_comparison_operators() {
+        // Expressions with ==, !=, >=, <= are not paths
+        let content = "Check that `score==100` or `count>=0` or `x!=y` or `a<=b`.";
+        let refs = extract_path_references(content);
+        assert!(
+            refs.is_empty(),
+            "comparison operators should be filtered: {:?}",
+            refs
+        );
+    }
+
+    #[test]
+    fn filters_empty_backtick() {
+        // Empty backtick content should not panic and should produce nothing
+        let content = "Here is `` an empty backtick.";
+        let refs = extract_path_references(content);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn filters_bare_name_with_unknown_extension() {
+        // A bare filename with an extension not in the allowed list should be filtered
+        let content = "See `MyScript.exe` for the binary.";
+        let refs = extract_path_references(content);
+        assert!(
+            refs.is_empty(),
+            "unknown extension should be filtered: {:?}",
+            refs
+        );
+    }
+
+    #[test]
+    fn filters_bare_name_without_dot() {
+        // A bare identifier with no dot should be filtered
+        let content = "See `MyConfig` for details.";
+        let refs = extract_path_references(content);
+        assert!(
+            refs.is_empty(),
+            "bare name without dot should be filtered: {:?}",
+            refs
+        );
+    }
+
+    #[test]
+    fn filters_string_with_spaces() {
+        // A backtick-quoted string containing spaces should be filtered
+        let content = "Use `git commit -m msg` to commit.";
+        let refs = extract_path_references(content);
+        // "git commit -m msg" starts with "git " so it's filtered by the shell command rule
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn filters_npm_commands() {
+        let content = "Run `npm install` to get packages.";
+        let refs = extract_path_references(content);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn filters_flag_arguments() {
+        let content = "Pass `--all-targets` to clippy.";
+        let refs = extract_path_references(content);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn unclosed_backtick_is_ignored() {
+        // An unclosed backtick: should not produce any ref and not panic
+        let content = "This has an unclosed `backtick";
+        let refs = extract_path_references(content);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn unclosed_markdown_link_is_ignored() {
+        // A markdown link with no closing paren should not produce a ref
+        let content = "See [link](docs/missing";
+        let refs = extract_path_references(content);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn looks_like_local_link_rejects_empty() {
+        // Directly test looks_like_local_link with an empty (whitespace) string
+        assert!(!looks_like_local_link("  "));
+    }
+
+    #[test]
+    fn looks_like_local_link_rejects_mailto() {
+        assert!(!looks_like_local_link("mailto:user@example.com"));
+    }
+
+    #[test]
+    fn looks_like_local_link_rejects_anchor_only() {
+        assert!(!looks_like_local_link("#section"));
+    }
+
+    #[test]
+    fn looks_like_local_link_accepts_relative_path() {
+        assert!(looks_like_local_link("docs/README.md"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests for find_broken_references
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn find_broken_references_empty_input() {
+        let result = find_broken_references(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn find_broken_references_no_path_refs_in_content() {
+        // Content that has no file references at all
+        let docs = vec![(
+            "README.md".to_string(),
+            "Just some prose with no paths.".to_string(),
+        )];
+        let result = find_broken_references(&docs);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn find_broken_references_existing_files() {
+        // find_broken_references checks Path::new(&path_ref).exists(), so it
+        // resolves relative to the current working directory. During `cargo
+        // test -p xtask`, the cwd is the xtask/ package directory. The xtask
+        // package's own Cargo.toml is therefore a reliable existing file we
+        // can reference without needing a path prefix.
+        let cargo_toml_exists = Path::new("Cargo.toml").exists();
+        if !cargo_toml_exists {
+            // Can't do a meaningful test without a real file — skip.
+            return;
+        }
+
+        let docs = vec![(
+            "FAKE_DOC.md".to_string(),
+            "See `Cargo.toml` for workspace config.".to_string(),
+        )];
+        let result = find_broken_references(&docs);
+        assert!(
+            result.is_empty(),
+            "Cargo.toml exists but was reported as broken: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn find_broken_references_broken_ref() {
+        let docs = vec![(
+            "some_doc.md".to_string(),
+            "See `nonexistent/path/that/does/not/exist.md` for details.".to_string(),
+        )];
+        let result = find_broken_references(&docs);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "some_doc.md");
+        assert_eq!(result[0].1, "nonexistent/path/that/does/not/exist.md");
+    }
+
+    #[test]
+    fn find_broken_references_multiple_docs_mixed() {
+        let docs = vec![
+            (
+                "doc_a.md".to_string(),
+                "See `no/such/file_a.md` here.".to_string(),
+            ),
+            ("doc_b.md".to_string(), "Nothing special here.".to_string()),
+            (
+                "doc_c.md".to_string(),
+                "See `no/such/file_c.md` here.".to_string(),
+            ),
+        ];
+        let result = find_broken_references(&docs);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0, "doc_a.md");
+        assert_eq!(result[1].0, "doc_c.md");
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests for render_scenario_index
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn render_scenario_index_empty_cases() {
+        let md = render_scenario_index(&[]);
+        assert!(md.contains("# Scenario Index"), "missing title");
+        assert!(md.contains("## Summary"), "missing summary header");
+        assert!(
+            md.contains("| # | Case | Units | Slices | Ambiguities | Families |"),
+            "missing table header"
+        );
+    }
+
+    #[test]
+    fn render_scenario_index_one_case_one_slice() {
+        let cases = vec![CaseInfo {
+            dir_name: "01-my-case".to_string(),
+            display_name: "my-case".to_string(),
+            num: 1,
+            unit_count: 3,
+            slice_count: 1,
+            ambiguity_count: 0,
+            families: vec!["core".to_string()],
+            unit_kinds: {
+                let mut m = BTreeMap::new();
+                m.insert("behavior".to_string(), 2usize);
+                m.insert("test".to_string(), 1usize);
+                m
+            },
+            slices: vec![SliceInfo {
+                id: "behavior-core".to_string(),
+                kind: "behavior".to_string(),
+                member_count: 2,
+                depends_on: vec![],
+            }],
+        }];
+
+        let md = render_scenario_index(&cases);
+
+        // Title and auto-generated notice
+        assert!(md.contains("# Scenario Index"), "missing title");
+        assert!(
+            md.contains("Auto-generated"),
+            "missing auto-generated notice"
+        );
+
+        // Summary table row
+        assert!(md.contains("my-case"), "missing display_name in summary");
+
+        // Detail section header uses dir_name
+        assert!(
+            md.contains("## 01-my-case"),
+            "missing dir_name section header"
+        );
+
+        // Slice table contains the slice id
+        assert!(md.contains("behavior-core"), "missing slice id");
+
+        // Empty depends_on renders as em-dash
+        assert!(
+            md.contains('\u{2014}'),
+            "missing em-dash for empty depends_on"
+        );
+    }
+
+    #[test]
+    fn render_scenario_index_slice_with_depends_on() {
+        let cases = vec![CaseInfo {
+            dir_name: "02-deps".to_string(),
+            display_name: "deps".to_string(),
+            num: 2,
+            unit_count: 1,
+            slice_count: 1,
+            ambiguity_count: 1,
+            families: vec!["ui".to_string()],
+            unit_kinds: BTreeMap::new(),
+            slices: vec![SliceInfo {
+                id: "ui-slice".to_string(),
+                kind: "feature".to_string(),
+                member_count: 1,
+                depends_on: vec!["slice-a".to_string(), "slice-b".to_string()],
+            }],
+        }];
+
+        let md = render_scenario_index(&cases);
+        assert!(md.contains("slice-a, slice-b"), "missing depends_on list");
+    }
+
+    #[test]
+    fn render_scenario_index_multiple_unit_kinds() {
+        let cases = vec![CaseInfo {
+            dir_name: "03-kinds".to_string(),
+            display_name: "kinds".to_string(),
+            num: 3,
+            unit_count: 4,
+            slice_count: 0,
+            ambiguity_count: 0,
+            families: vec![],
+            unit_kinds: {
+                let mut m = BTreeMap::new();
+                m.insert("mechanical".to_string(), 2usize);
+                m.insert("test".to_string(), 2usize);
+                m
+            },
+            slices: vec![],
+        }];
+
+        let md = render_scenario_index(&cases);
+        assert!(
+            md.contains("- mechanical: 2"),
+            "missing mechanical kind count"
+        );
+        assert!(md.contains("- test: 2"), "missing test kind count");
+    }
+
+    // -----------------------------------------------------------------------
+    // Integration test: render against real fixtures
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn scenario_index_against_real_fixtures() {
+        // CARGO_MANIFEST_DIR points to the xtask/ package directory.
+        // The fixtures live one level up at <workspace-root>/fixtures/cases/.
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cases_dir = manifest_dir.join("../fixtures/cases");
+        let cases_dir = cases_dir.as_path();
+        if !cases_dir.is_dir() {
+            // Fixtures not present in this environment — skip gracefully.
+            return;
+        }
+
+        let mut entries: Vec<_> = fs::read_dir(cases_dir)
+            .expect("read fixtures/cases/")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .collect();
+        entries.sort_by_key(|e| e.file_name());
+
+        let mut cases = Vec::new();
+        for (i, entry) in entries.iter().enumerate() {
+            let dir_name = entry.file_name().to_string_lossy().to_string();
+            let dir_path = entry.path();
+
+            let units_text =
+                fs::read_to_string(dir_path.join("input.units.json")).expect("read units");
+            let plan_text =
+                fs::read_to_string(dir_path.join("expected.plan.json")).expect("read plan");
+
+            let units: Vec<serde_json::Value> =
+                serde_json::from_str(&units_text).expect("parse units");
+            let plan: serde_json::Value = serde_json::from_str(&plan_text).expect("parse plan");
+
+            let mut unit_kinds: BTreeMap<String, usize> = BTreeMap::new();
+            let mut families_set = std::collections::BTreeSet::new();
+            for unit in &units {
+                if let Some(kind) = unit.get("kind").and_then(|v| v.as_str()) {
+                    *unit_kinds.entry(kind.to_string()).or_insert(0) += 1;
+                }
+                if let Some(family) = unit.get("family").and_then(|v| v.as_str()) {
+                    families_set.insert(family.to_string());
+                }
+            }
+
+            let slices_arr = plan
+                .get("slices")
+                .and_then(|v| v.as_array())
+                .expect("slices array");
+
+            let slices: Vec<SliceInfo> = slices_arr
+                .iter()
+                .map(|s| SliceInfo {
+                    id: s
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    kind: s
+                        .get("kind")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    member_count: s
+                        .get("members")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.len())
+                        .unwrap_or(0),
+                    depends_on: s
+                        .get("depends_on")
+                        .and_then(|v| v.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                })
+                .collect();
+
+            let ambiguity_count = plan
+                .get("ambiguities")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+
+            let display_name = dir_name
+                .strip_prefix(&format!("{:02}-", i + 1))
+                .unwrap_or(&dir_name)
+                .to_string();
+
+            cases.push(CaseInfo {
+                dir_name,
+                display_name,
+                num: i + 1,
+                unit_count: units.len(),
+                slice_count: slices_arr.len(),
+                ambiguity_count,
+                families: families_set.into_iter().collect(),
+                unit_kinds,
+                slices,
+            });
+        }
+
+        assert!(!cases.is_empty(), "no fixture cases found");
+
+        let md = render_scenario_index(&cases);
+
+        assert!(!md.is_empty(), "rendered markdown is empty");
+        assert!(md.contains("# Scenario Index"), "missing title");
+        assert!(
+            md.contains("01-feature-plus-refactor"),
+            "missing first fixture case"
+        );
+        // Every case dir_name should appear as a section header
+        for case in &cases {
+            assert!(
+                md.contains(&format!("## {}", case.dir_name)),
+                "missing section for case: {}",
+                case.dir_name
+            );
+        }
     }
 }
