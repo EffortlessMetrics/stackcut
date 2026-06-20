@@ -382,6 +382,9 @@ fn integration_materialize_dry_run() {
 // Scenario: Type-change (file → symlink) produces Unknown status with note
 // ---------------------------------------------------------------------------
 
+// Unix-only: relies on `std::os::unix::fs::symlink` and a `/dev/null` symlink
+// target to produce a Git type-change ('T'). Skipped on Windows.
+#[cfg(unix)]
 #[test]
 fn integration_type_change_produces_unknown_status() {
     let tmp = tempdir().unwrap();
